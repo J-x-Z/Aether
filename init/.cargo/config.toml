@@ -1,7 +1,14 @@
 [build]
+# Default to x86; override with --target for ARM64
 target = "x86_64-unknown-none"
 
 [target.x86_64-unknown-none]
+rustflags = [
+    "-C", "link-arg=-Tlinker.ld",
+    "-C", "relocation-model=static",
+]
+
+[target.aarch64-unknown-none]
 rustflags = [
     "-C", "link-arg=-Tlinker.ld",
     "-C", "relocation-model=static",

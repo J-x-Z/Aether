@@ -8,7 +8,11 @@ use core::arch::asm;
 const SYS_WRITE: usize = 1;
 const SYS_EXIT: usize = 60;
 
-/// Minimal Syscall Wrapper
+// ================================================================================
+// x86_64 Syscall Wrappers
+// ================================================================================
+
+#[cfg(target_arch = "x86_64")]
 unsafe fn syscall1(nr: usize, arg0: usize) -> isize {
     let ret: isize;
     asm!(
@@ -22,6 +26,7 @@ unsafe fn syscall1(nr: usize, arg0: usize) -> isize {
     ret
 }
 
+#[cfg(target_arch = "x86_64")]
 unsafe fn syscall3(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
     let ret: isize;
     asm!(
@@ -37,9 +42,57 @@ unsafe fn syscall3(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
     ret
 }
 
+// ================================================================================
+// ARM64 (AArch64) Syscall Wrappers
+// ================================================================================
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn syscall1(nr: usize, arg0: usize) -> isize {
+    let ret: isize;
+    asm!(
+        "mov x8, {nr}",
+        "mov x0, {arg0}",
+        "svc #0",
+        "mov {ret}, x0",
+        nr = in(reg) nr,
+        arg0 = in(reg) arg0,
+        ret = out(reg) ret,
+        out("x8") _,
+        out("x0") _,
+    );
+    ret
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn syscall3(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
+    let ret: isize;
+    asm!(
+        "mov x8, {nr}",
+        "mov x0, {arg0}",
+        "mov x1, {arg1}",
+        "mov x2, {arg2}",
+        "svc #0",
+        "mov {ret}, x0",
+        nr = in(reg) nr,
+        arg0 = in(reg) arg0,
+        arg1 = in(reg) arg1,
+        arg2 = in(reg) arg2,
+        ret = out(reg) ret,
+        out("x8") _,
+        out("x0") _,
+        out("x1") _,
+        out("x2") _,
+    );
+    ret
+}
+
+// ================================================================================
+// Entry Point
+// ================================================================================
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    let msg = "Hello from Userspace (Ring 3)!\n";
+    let msg = "Hello from Userspace (Ring 3 / EL0)!\n";
     unsafe {
         // write(1, msg, len)
         syscall3(SYS_WRITE, 1, msg.as_ptr() as usize, msg.len());
@@ -49,10 +102,20 @@ pub extern "C" fn _start() -> ! {
     }
     
     // Should not reach here
-    loop {}
+    loop {
+        #[cfg(target_arch = "x86_64")]
+        unsafe { asm!("hlt"); }
+        #[cfg(target_arch = "aarch64")]
+        unsafe { asm!("wfi"); }
+    }
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    loop {}
+    loop {
+        #[cfg(target_arch = "x86_64")]
+        unsafe { asm!("hlt"); }
+        #[cfg(target_arch = "aarch64")]
+        unsafe { asm!("wfi"); }
+    }
 }
