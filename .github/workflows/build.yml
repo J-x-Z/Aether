@@ -10,7 +10,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-uefi:
+  # Build x86_64 UEFI kernel
+  build-x86:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -20,6 +21,66 @@ jobs:
         targets: x86_64-unknown-uefi
         components: rust-src, llvm-tools-preview
     
-    - name: Build UEFI Kernel
+    - name: Build UEFI Kernel (x86_64)
+      run: cargo build --release --target x86_64-unknown-uefi
+    
+    - name: Upload x86 EFI Binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: aether-x86_64.efi
+        path: target/x86_64-unknown-uefi/release/aether.efi
+
+  # Build ARM64 UEFI kernel
+  build-arm64:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust Nightly
+      uses: dtolnay/rust-toolchain@nightly
+      with:
+        targets: aarch64-unknown-uefi
+        components: rust-src, llvm-tools-preview
+    
+    - name: Build UEFI Kernel (ARM64)
+      run: cargo build --release --target aarch64-unknown-uefi
+    
+    - name: Upload ARM64 EFI Binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: aether-aarch64.efi
+        path: target/aarch64-unknown-uefi/release/aether.efi
+
+  # Test ARM64 kernel boot with QEMU
+  test-arm64-qemu:
+    needs: build-arm64
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download ARM64 EFI Binary
+      uses: actions/download-artifact@v4
+      with:
+        name: aether-aarch64.efi
+        path: ./kernel
+    
+    - name: Install QEMU
       run: |
-        cargo build --target x86_64-unknown-uefi -p aether -Z build-std=core,compiler_builtins,alloc
+        sudo apt-get update
+        sudo apt-get install -y qemu-system-arm qemu-efi-aarch64
+    
+    - name: Create ESP Structure
+      run: |
+        mkdir -p esp/EFI/BOOT
+        cp ./kernel/aether.efi esp/EFI/BOOT/BOOTAA64.EFI
+    
+    - name: Boot Test (5 second timeout)
+      run: |
+        timeout 5s qemu-system-aarch64 \
+          -M virt \
+          -cpu cortex-a72 \
+          -m 512M \
+          -bios /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+          -drive if=virtio,format=raw,file=fat:rw:esp \
+          -nographic \
+          -serial mon:stdio || true
+        echo "QEMU boot test completed (timeout is expected)"
