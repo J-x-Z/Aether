@@ -1,0 +1,25 @@
+name: Aether Kernel CI
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  pull_request:
+    branches: [ "master", "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-uefi:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust Nightly
+      uses: dtolnay/rust-toolchain@nightly
+      with:
+        targets: x86_64-unknown-uefi
+        components: rust-src, llvm-tools-preview
+    
+    - name: Build UEFI Kernel
+      run: |
+        cargo build --target x86_64-unknown-uefi -p aether -Z build-std=core,compiler_builtins,alloc
