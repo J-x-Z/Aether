@@ -1,0 +1,32 @@
+[workspace]
+members = [
+    ".",           # Main kernel binary
+    "aether-core", # Shared kernel abstractions
+    "abi"          # Application Binary Interface
+]
+resolver = "2"
+
+[package]
+name = "aether"
+version = "0.1.0"
+edition = "2021"
+description = "Aether - Hybrid kernel with POSIX/glibc compatibility"
+license = "GPL-3.0"
+repository = "https://github.com/J-x-Z/Aether"
+
+[dependencies]
+uefi = { version = "0.28", features = ["alloc"] }
+uefi-services = "0.25"
+log = "0.4"
+aether-abi = { path = "./abi" }
+aether-core = { path = "./aether-core" }
+pc-keyboard = "0.8.0"
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+x86_64 = "0.14"
+lazy_static = { version = "1.4", features = ["spin_no_std"] }
+pic8259 = "0.10.1"
+spin = "0.9"
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+# arm specific deps if needed

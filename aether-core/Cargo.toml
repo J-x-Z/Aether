@@ -1,0 +1,10 @@
+[package]
+name = "aether-core"
+version = "0.1.0"
+edition = "2021"
+description = "Shared kernel abstractions for Aether and AetherOS"
+
+[dependencies]
+aether-abi = { path = "../abi" }
+log = "0.4"
+spin = "0.9"
