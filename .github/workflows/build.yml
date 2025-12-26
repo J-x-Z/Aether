@@ -84,3 +84,37 @@ jobs:
           -nographic \
           -serial mon:stdio || true
         echo "QEMU boot test completed (timeout is expected)"
+
+  # Test x86_64 kernel boot with QEMU
+  test-x86-qemu:
+    needs: build-x86
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download x86 EFI Binary
+      uses: actions/download-artifact@v4
+      with:
+        name: aether-x86_64.efi
+        path: ./kernel
+    
+    - name: Install QEMU and OVMF
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-system-x86 ovmf
+    
+    - name: Create ESP Structure
+      run: |
+        mkdir -p esp/EFI/BOOT
+        cp ./kernel/aether.efi esp/EFI/BOOT/BOOTX64.EFI
+    
+    - name: Boot Test (5 second timeout)
+      run: |
+        timeout 5s qemu-system-x86_64 \
+          -enable-kvm \
+          -m 512M \
+          -bios /usr/share/OVMF/OVMF_CODE.fd \
+          -drive format=raw,file=fat:rw:esp \
+          -nographic \
+          -serial mon:stdio 2>&1 || true
+        echo "QEMU x86 boot test completed (timeout is expected)"
