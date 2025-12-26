@@ -1,0 +1,11 @@
+/Users/jiaxi/.gemini/antigravity/scratch/Aether/target/aarch64-unknown-uefi/debug/deps/aarch64-7deef38d06628e23.d: /Users/jiaxi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aarch64-0.0.11/src/lib.rs /Users/jiaxi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aarch64-0.0.11/src/instructions.rs /Users/jiaxi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aarch64-0.0.11/src/irq.rs /Users/jiaxi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aarch64-0.0.11/src/paging.rs /Users/jiaxi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aarch64-0.0.11/src/regs.rs
+
+/Users/jiaxi/.gemini/antigravity/scratch/Aether/target/aarch64-unknown-uefi/debug/deps/libaarch64-7deef38d06628e23.rlib: /Users/jiaxi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aarch64-0.0.11/src/lib.rs /Users/jiaxi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aarch64-0.0.11/src/instructions.rs /Users/jiaxi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aarch64-0.0.11/src/irq.rs /Users/jiaxi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aarch64-0.0.11/src/paging.rs /Users/jiaxi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aarch64-0.0.11/src/regs.rs
+
+/Users/jiaxi/.gemini/antigravity/scratch/Aether/target/aarch64-unknown-uefi/debug/deps/libaarch64-7deef38d06628e23.rmeta: /Users/jiaxi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aarch64-0.0.11/src/lib.rs /Users/jiaxi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aarch64-0.0.11/src/instructions.rs /Users/jiaxi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aarch64-0.0.11/src/irq.rs /Users/jiaxi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aarch64-0.0.11/src/paging.rs /Users/jiaxi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aarch64-0.0.11/src/regs.rs
+
+/Users/jiaxi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aarch64-0.0.11/src/lib.rs:
+/Users/jiaxi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aarch64-0.0.11/src/instructions.rs:
+/Users/jiaxi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aarch64-0.0.11/src/irq.rs:
+/Users/jiaxi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aarch64-0.0.11/src/paging.rs:
+/Users/jiaxi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aarch64-0.0.11/src/regs.rs:

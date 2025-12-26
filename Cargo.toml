@@ -4,6 +4,7 @@ members = [
     "aether-core", # Shared kernel abstractions
     "abi"          # Application Binary Interface
 ]
+exclude = ["init"]
 resolver = "2"
 
 [package]
@@ -29,4 +30,7 @@ pic8259 = "0.10.1"
 spin = "0.9"
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
-# arm specific deps if needed
+aarch64 = "0.0.11"
+spin = "0.9"
+cortex-a = "8.1"
+lazy_static = { version = "1.4", features = ["spin_no_std"] }

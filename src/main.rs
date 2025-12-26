@@ -1,160 +1,142 @@
 #![no_std]
 #![no_main]
-#![feature(abi_x86_interrupt)]
+#![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
 
 extern crate alloc;
+
+mod arch;
+mod mm;
+mod sched;
+mod fs;
+mod drivers;
+mod syscall;
+
+// Legacy modules - x86 only, to be refactored/removed
+#[cfg(target_arch = "x86_64")]
 mod backend;
+#[cfg(target_arch = "x86_64")]
 mod interrupts;
+#[cfg(target_arch = "x86_64")]
 mod video;
+#[cfg(target_arch = "x86_64")]
 mod multitasking;
+#[cfg(target_arch = "x86_64")]
 mod globals;
+#[cfg(target_arch = "x86_64")]
 mod keyboard;
 
 use uefi::prelude::*;
 use uefi::proto::console::gop::GraphicsOutput;
-use uefi::proto::media::file::File; // Trait for open/read
-use uefi::proto::media::file::FileAttribute;
-use uefi::proto::media::file::FileMode;
 
 #[entry]
-fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
+fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     uefi_services::init(&mut system_table).unwrap();
-    
-    // Reset console
     system_table.stdout().reset(false).unwrap();
     
-    log::info!("AetherOS Hybrid Kernel (UEFI Mode) [Step 5: Execution]");
+    log::info!("Aether Kernel 2.0 (Hybrid/POSIX) booting...");
     
-    // --- Video Initialization Start ---
-    let bt = system_table.boot_services();
-    let gop_handle = bt.get_handle_for_protocol::<GraphicsOutput>().expect("No GOP handle found");
-    let mut gop = bt.open_protocol_exclusive::<GraphicsOutput>(gop_handle).expect("Failed to open GOP");
+    // 1. Initialize Video (GOP) - x86 only for now
+    #[cfg(target_arch = "x86_64")]
+    init_video(&system_table);
     
-    let mode_info = gop.current_mode_info();
-    let (width, height) = mode_info.resolution();
+    // 2. Initialize Architecture
+    log::info!("[Kernel] Initializing Architecture...");
+    arch::init();
+    #[cfg(target_arch = "x86_64")]
+    interrupts::init_idt(); // Use legacy interrupt handler for now as arch::idt is stub
     
-    let mut fb = gop.frame_buffer();
-    let fb_ptr = fb.as_mut_ptr();
-    let size = fb.size();
-    let stride = mode_info.stride();
+    // 3. Initialize Memory Management
+    log::info!("[Kernel] Initializing Memory Management...");
+    mm::init();
     
-    log::info!("GOP: {}x{}, Stride: {}, FB: {:p}", width, height, stride, fb_ptr);
+    // 4. Initialize Filesystem
+    log::info!("[Kernel] Initializing Filesystem...");
+    fs::init();
     
-    // Initialize Video Module
-    crate::video::init(fb_ptr, size, width, height, stride);
+    // 5. Initialize Scheduler
+    log::info!("[Kernel] Initializing Scheduler...");
+    sched::init();
     
-    // Clear Screen (Blue)
-    unsafe {
-        let ptr = fb_ptr as *mut u32;
-        let count = size / 4;
-        for i in 0..count {
-             // ABGR or BGRA? Usually BGRA (Blue is low byte)
-             // 0x000000FF = Red? 
-             // 0xFF000000 = Alpha?
-             // Let's try 0xFF000080 (Dark Blue)
-             *ptr.add(i) = 0xFF000080; 
+    // 6. Initialize Drivers
+    log::info!("[Kernel] Initializing Drivers...");
+    drivers::init();
+    
+    // 7. Load Init Process
+    log::info!("[Kernel] Loading /init...");
+    if let Ok(inode) = fs::open("/init", 0) {
+        // Allocate buffer for init (64KB max for now)
+        let mut buffer = alloc::vec![0u8; 65536];
+        let len = inode.read_at(0, &mut buffer);
+        log::info!("[Kernel] Read init: {} bytes", len);
+        
+        if len > 0 {
+            // Map Userspace Memory (Code: 0x400000)
+            let code_addr = 0x400000;
+            mm::paging::make_user_accessible(code_addr, len as u64);
+            
+            // Map Userspace Stack (Stack: 0x600000)
+            let stack_addr = 0x600000;
+            let stack_size = 4096 * 4;
+            mm::paging::make_user_accessible(stack_addr, stack_size as u64);
+            
+            // Copy Code to Userspace Address
+            unsafe {
+                core::ptr::copy_nonoverlapping(buffer.as_ptr(), code_addr as *mut u8, len);
+            }
+            
+            log::info!("[Kernel] Entering Userspace (Ring 3)...");
+            
+            // Jump to Ring 3
+            // Stack grows down, so pointer is top of stack region
+            unsafe {
+                arch::enter_usermode(code_addr, stack_addr + stack_size as u64);
+            }
         }
+    } else {
+        log::error!("[Kernel] Failed to open /init");
     }
-    // --- Video Initialization End ---
-    
-    // Initialize IDT
-    interrupts::init_idt();
-    
-    // --- FileSystem Loading Start ---
-    log::info!("Searching for guest kernel...");
-    
-    let bt = system_table.boot_services();
-    
-    // 1. Get LoadedImage to find out which device we booted from
-    let loaded_image = bt.open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(image_handle)
-        .expect("Failed to open LoadedImage");
-    let device_handle = loaded_image.device().expect("Device handle missing");
-    
-    // 2. Open FileSystem on that device
-    let mut sfs = bt.open_protocol_exclusive::<uefi::proto::media::fs::SimpleFileSystem>(device_handle)
-        .expect("Failed to open SimpleFileSystem");
-    let mut root = sfs.open_volume().expect("Failed to open volume");
-    
-    // 3. Open guest file
-    let filename = uefi::cstr16!("guest-x86_64.bin");
-    
-    // Explicit type to help inference
-    let guest_image = match root.open(filename, FileMode::Read, FileAttribute::empty()) {
-        Ok(file_handle) => {
-             // Convert generic FileHandle to RegularFile
-             let mut file = file_handle.into_regular_file().expect("Not a regular file");
-             log::info!("Found guest kernel: guest-x86_64.bin");
-             
-             // Get file size (needs info buffer)
-             // Simplified: Just seek end
-             file.set_position(0xFFFFFFFFFFFFFFFF).unwrap(); 
-             let size = file.get_position().unwrap();
-             file.set_position(0).unwrap();
-             
-             log::info!("Guest Size: {} bytes", size);
-             
-             let mut buffer = alloc::vec![0u8; size as usize];
-             file.read(&mut buffer).unwrap();
-             buffer
-        },
-        Err(e) => {
-            log::error!("Failed to open guest-x86_64.bin: {:?}", e);
-            panic!("Cannot load guest kernel!");
-        }
-    };
-    // --- FileSystem Loading End ---
 
-
- 
-     log::info!("Initializing Scheduler...");
-
-
-    // 1. Setup Scheduler
-    let mut scheduler = aether_core::scheduler::Scheduler::new();
+    log::error!("[Kernel] Init failed or returned!");
     
-    // 2. Spawn Initial Processes
-    log::info!("Spawning Guest Instance 1...");
-    let guest_copy = guest_image.clone();
-    let backend1 = alloc::sync::Arc::new(backend::UefiBackend::new(guest_image));
-    let pid1 = scheduler.spawn(backend1.clone());
-    
-    if let Some(proc) = scheduler.get_process_mut(pid1) {
-        let entry = backend1.entry_point();
-        let base = backend1.base_address();
-        log::info!("Init PID {} Stack. Base: {:x}", pid1, base);
-        proc.stack_pointer = multitasking::init_stack(&mut proc.stack, entry, base);
-    }
-    
-    log::info!("Spawning Guest Instance 2...");
-    let backend2 = alloc::sync::Arc::new(backend::UefiBackend::new(guest_copy));
-    let pid2 = scheduler.spawn(backend2.clone());
-    
-
-
-    // Process 2 Stack
-    if let Some(proc) = scheduler.get_process_mut(pid2) {
-        let entry = backend2.entry_point();
-        // Base address will be different because it's a new allocation!
-        let base = backend2.base_address();
-        log::info!("Init PID {} Stack. Base: {:x}", pid2, base);
-        proc.stack_pointer = multitasking::init_stack(&mut proc.stack, entry, base);
-    }
-    
-    // Initialize Global Scheduler
-    {
-        let mut lock = globals::SCHEDULER.lock();
-        *lock = Some(scheduler);
-    }
-    
-    // Enable Competing Interrupts (Timer)
-    x86_64::instructions::interrupts::enable();
-    
-    log::info!("Scheduler initialized. Entering Idle Loop via Interrupts...");
-    
+    // Halt Loop
     loop {
+        #[cfg(target_arch = "x86_64")]
         x86_64::instructions::hlt();
+        #[cfg(target_arch = "aarch64")]
+        unsafe { core::arch::asm!("wfi"); }
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn init_video(st: &SystemTable<Boot>) {
+    let bt = st.boot_services();
+    if let Ok(gop_handle) = bt.get_handle_for_protocol::<GraphicsOutput>() {
+        if let Ok(mut gop) = bt.open_protocol_exclusive::<GraphicsOutput>(gop_handle) {
+             let mode_info = gop.current_mode_info();
+             let (width, height) = mode_info.resolution();
+             let mut fb = gop.frame_buffer();
+             let fb_ptr = fb.as_mut_ptr();
+             let size = fb.size();
+             let stride = mode_info.stride();
+             
+             crate::video::init(fb_ptr, size, width, height, stride);
+             log::info!("[Video] Initialized {}x{} (stride: {})", width, height, stride);
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn test_syscalls() {
+    log::info!("[Test] Testing POSIX syscalls internally...");
     
-    // Unreachable
-    // Status::SUCCESS 
+    // Test open (should fail as file doesn't exist yet, or succeed if we stubbed it)
+    let ret = syscall::dispatch(syscall::numbers::SYS_OPEN, 0, 0, 0); // filename=NULL
+    log::info!("[Test] open(NULL) = {}", ret);
+    
+    // Test write to stdout (fd=1)
+    let msg = "Hello from Internal Syscall!\n";
+    let ptr = msg.as_ptr() as usize;
+    let len = msg.len();
+    let ret = syscall::dispatch(syscall::numbers::SYS_WRITE, 1, ptr, len);
+    log::info!("[Test] write(1, ...) = {}", ret);
 }
