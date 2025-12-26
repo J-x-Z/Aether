@@ -28,10 +28,16 @@ pub struct FileDescriptor {
 /// A Process / Task Control Block
 pub struct Task {
     pub id: Pid,
+    pub parent_id: Pid,
     pub state: TaskState,
     pub stack: Vec<u8>,
     pub stack_top: usize,
     pub fd_table: Vec<Option<FileDescriptor>>,
+    // Saved context for context switching
+    pub saved_rsp: u64,
+    pub saved_rip: u64,
+    // Exit status
+    pub exit_status: i32,
 }
 
 static NEXT_PID: AtomicUsize = AtomicUsize::new(1);
@@ -41,32 +47,49 @@ impl Task {
         let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
         let mut task = Self {
             id: pid,
+            parent_id: 0, // Init has no parent
             state: TaskState::Ready,
             stack: alloc::vec![0; stack_size],
-            stack_top: 0, // Should be calculated based on stack ptr
+            stack_top: 0,
             fd_table: Vec::new(),
+            saved_rsp: 0,
+            saved_rip: 0,
+            exit_status: 0,
         };
         
         // Initialize stdio
-        // 0: stdin, 1: stdout, 2: stderr
-        // For now, push None or a dummy console inode
-        task.fd_table.push(None); // 0
-        task.fd_table.push(None); // 1
-        task.fd_table.push(None); // 2
+        task.fd_table.push(None); // 0: stdin
+        task.fd_table.push(None); // 1: stdout
+        task.fd_table.push(None); // 2: stderr
         
         task
     }
     
+    /// Fork this task - create a copy with new PID
+    pub fn fork(&self, child_rsp: u64, child_rip: u64) -> Self {
+        let child_pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+        
+        Self {
+            id: child_pid,
+            parent_id: self.id,
+            state: TaskState::Ready,
+            stack: self.stack.clone(),
+            stack_top: self.stack_top,
+            fd_table: self.fd_table.clone(),
+            saved_rsp: child_rsp,
+            saved_rip: child_rip,
+            exit_status: 0,
+        }
+    }
+    
     /// Allocate a new file descriptor
     pub fn add_file(&mut self, file: FileDescriptor) -> usize {
-        // Look for free slot
         for (i, slot) in self.fd_table.iter_mut().enumerate() {
             if slot.is_none() {
                 *slot = Some(file);
                 return i;
             }
         }
-        // Push new
         self.fd_table.push(Some(file));
         self.fd_table.len() - 1
     }

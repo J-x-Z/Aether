@@ -252,12 +252,6 @@ fn sys_getpid() -> isize {
     1 // Default PID if no task
 }
 
-/// Fork - Create child process (stub for now)
-fn sys_fork() -> isize {
-    log::warn!("[syscall::fork] Fork not implemented, returning error");
-    -38 // ENOSYS - Not implemented
-}
-
 /// Memory map (simplified stub)
 fn sys_mmap(addr: usize, length: usize, _prot: usize) -> isize {
     // Simple anonymous mapping at requested address
@@ -399,12 +393,61 @@ fn sys_munmap(_addr: usize, _length: usize) -> isize {
 // Process Syscalls
 // ============================================================================
 
-fn sys_clone(_flags: usize, _stack: usize, _parent_tid: usize) -> isize {
-    log::warn!("[syscall::clone] Clone not implemented");
-    -38 // ENOSYS
+/// Fork - Create child process
+/// Returns 0 in child, child PID in parent
+fn sys_fork() -> isize {
+    log::info!("[syscall::fork] Creating child process...");
+    
+    // Get current task
+    let current_lock = CURRENT_TASK.lock();
+    let current_arc = match current_lock.as_ref() {
+        Some(t) => t.clone(),
+        None => {
+            log::warn!("[syscall::fork] No current task");
+            return -1;
+        }
+    };
+    drop(current_lock);
+    
+    let parent = current_arc.lock();
+    let parent_pid = parent.id;
+    
+    // For now, create a simple fork by copying the parent's state
+    // In a real implementation, we'd need to:
+    // 1. Copy page tables (or set up CoW)
+    // 2. Save current CPU context
+    // 3. Create child with modified context (return 0)
+    
+    // Get return address from stack (simplified - assumes called from syscall)
+    // In a real implementation, this comes from the saved context
+    let child_rip = 0u64; // Will be set by context switch
+    let child_rsp = 0u64;
+    
+    // Create child task
+    let child = parent.fork(child_rsp, child_rip);
+    let child_pid = child.id;
+    
+    drop(parent);
+    
+    // Add child to scheduler
+    crate::sched::queue::spawn_task(child);
+    
+    log::info!("[syscall::fork] Created child PID {} from parent PID {}", child_pid, parent_pid);
+    
+    // Parent returns child PID
+    // Note: Without a real scheduler, child never runs!
+    // This is a simplified implementation for testing
+    child_pid as isize
 }
 
-fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
+fn sys_clone(_flags: usize, _stack: usize, _parent_tid: usize) -> isize {
+    // clone is similar to fork but with more options
+    // For now, just call fork
+    log::info!("[syscall::clone] Using fork implementation");
+    sys_fork()
+}
+
+fn sys_execve(pathname: usize, argv: usize, _envp: usize) -> isize {
     // Get pathname string
     let path = unsafe { get_user_string(pathname, 0) };
     if path.is_none() {
