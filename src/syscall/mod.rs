@@ -1,9 +1,12 @@
 //! POSIX Syscall Interface
 
+mod elf;
+
 use crate::sched::queue::CURRENT_TASK;
 use crate::sched::task::FileDescriptor;
 use crate::fs;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 /// Syscall numbers (Linux x86_64 ABI compatible)
 pub mod numbers {
@@ -401,9 +404,91 @@ fn sys_clone(_flags: usize, _stack: usize, _parent_tid: usize) -> isize {
     -38 // ENOSYS
 }
 
-fn sys_execve(_pathname: usize, _argv: usize, _envp: usize) -> isize {
-    log::warn!("[syscall::execve] Execve not implemented");
-    -38 // ENOSYS
+fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
+    // Get pathname string
+    let path = unsafe { get_user_string(pathname, 0) };
+    if path.is_none() {
+        log::warn!("[syscall::execve] Invalid pathname");
+        return -14; // EFAULT
+    }
+    let path = path.unwrap();
+    
+    log::info!("[syscall::execve] Loading: {}", path);
+    
+    // Open the file
+    let inode = match fs::open(&path, 0) {
+        Ok(inode) => inode,
+        Err(_) => {
+            log::warn!("[syscall::execve] File not found: {}", path);
+            return -2; // ENOENT
+        }
+    };
+    
+    // Read file contents
+    let mut buffer = alloc::vec![0u8; 65536]; // 64KB max for now
+    let len = inode.read_at(0, &mut buffer);
+    
+    if len == 0 {
+        log::warn!("[syscall::execve] Empty file");
+        return -8; // ENOEXEC
+    }
+    
+    // Load ELF
+    let loaded = match elf::load_elf(&buffer[..len]) {
+        Ok(l) => l,
+        Err(e) => {
+            log::warn!("[syscall::execve] ELF load error: {}", e);
+            return -8; // ENOEXEC
+        }
+    };
+    
+    log::info!("[syscall::execve] ELF loaded, entry: 0x{:x}", loaded.entry_point);
+    
+    // Parse argv
+    let mut argv_vec: Vec<&[u8]> = Vec::new();
+    if argv != 0 {
+        unsafe {
+            let mut ptr = argv as *const usize;
+            while *ptr != 0 {
+                let arg_ptr = *ptr as *const u8;
+                let mut len = 0;
+                while *arg_ptr.add(len) != 0 {
+                    len += 1;
+                    if len > 1024 { break; }
+                }
+                argv_vec.push(core::slice::from_raw_parts(arg_ptr, len));
+                ptr = ptr.add(1);
+            }
+        }
+    }
+    
+    // For simplicity, use empty envp for now
+    let envp_vec: Vec<&[u8]> = Vec::new();
+    
+    // Set up new stack at 0x7FFFFF000000 (typical Linux user stack area)
+    let stack_top = 0x7FFFFF000000u64;
+    let stack_size = 8 * 4096; // 32KB stack
+    crate::mm::paging::make_user_accessible(stack_top - stack_size, stack_size);
+    
+    // Set up stack with argv/envp
+    let user_sp = elf::setup_user_stack(stack_top, &argv_vec, &envp_vec);
+    
+    log::info!("[syscall::execve] Stack at 0x{:x}, entering usermode...", user_sp);
+    
+    // Jump to new program
+    // Note: This replaces the current "process" - we never return
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::enter_usermode(loaded.entry_point, user_sp);
+    }
+    
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        crate::arch::aarch64::enter_usermode(loaded.entry_point, user_sp);
+    }
+    
+    // Should never reach here
+    -1
 }
 
 fn sys_wait4(_pid: i32, _wstatus: usize, _options: usize) -> isize {
