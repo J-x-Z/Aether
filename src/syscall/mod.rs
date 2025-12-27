@@ -1,6 +1,7 @@
 //! POSIX Syscall Interface
 
 mod elf;
+pub mod dynlink;
 
 use crate::sched::queue::CURRENT_TASK;
 use crate::sched::task::FileDescriptor;
@@ -447,7 +448,7 @@ fn sys_clone(_flags: usize, _stack: usize, _parent_tid: usize) -> isize {
     sys_fork()
 }
 
-fn sys_execve(pathname: usize, argv: usize, _envp: usize) -> isize {
+fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
     // Get pathname string
     let path = unsafe { get_user_string(pathname, 0) };
     if path.is_none() {
@@ -468,16 +469,26 @@ fn sys_execve(pathname: usize, argv: usize, _envp: usize) -> isize {
     };
     
     // Read file contents
-    let mut buffer = alloc::vec![0u8; 65536]; // 64KB max for now
+    // REAL IMPLEMENTATION: Should use mmap or read by chunks
+    // For now, increase buffer to 1MB to handle reasonably sized binaries
+    let mut buffer = alloc::vec![0u8; 1024 * 1024]; 
     let len = inode.read_at(0, &mut buffer);
     
-    if len == 0 {
-        log::warn!("[syscall::execve] Empty file");
+    if len < 64 { // Minimum ELF size roughly
+        log::warn!("[syscall::execve] File too small");
         return -8; // ENOEXEC
     }
     
-    // Load ELF
-    let loaded = match elf::load_elf(&buffer[..len]) {
+    let buffer_slice = &buffer[..len];
+    let header = unsafe { *(buffer_slice.as_ptr() as *const elf::Elf64Header) };
+    
+    // Determine Main Load Base
+    // ET_DYN (3) = PIE, needs base address (e.g. 0x00400000)
+    // ET_EXEC (2) = Fixed, base = 0
+    let main_base = if header.e_type == 3 { 0x00400000 } else { 0 };
+    
+    // Load Main ELF
+    let loaded = match elf::load_elf(buffer_slice, main_base) {
         Ok(l) => l,
         Err(e) => {
             log::warn!("[syscall::execve] ELF load error: {}", e);
@@ -485,7 +496,55 @@ fn sys_execve(pathname: usize, argv: usize, _envp: usize) -> isize {
         }
     };
     
-    log::info!("[syscall::execve] ELF loaded, entry: 0x{:x}", loaded.entry_point);
+    // Prepare Auxv
+    let mut auxv = Vec::new();
+    let entry_point;
+    
+    // Check for Interpreter
+    if let Some(interp_path) = loaded.interp {
+        log::info!("[syscall::execve] Interpreter requested: {}", interp_path);
+        
+        // Open Interpreter
+        let interp_inode = match fs::open(&interp_path, 0) {
+            Ok(inode) => inode,
+            Err(_) => {
+                log::warn!("[syscall::execve] Interpreter not found: {}", interp_path);
+                return -2; // ENOENT
+            }
+        };
+        
+        let mut interp_buf = alloc::vec![0u8; 256 * 1024]; // 256KB constraint for ld.so
+        let interp_len = interp_inode.read_at(0, &mut interp_buf);
+        
+        // Load Interpreter at high address (e.g. 0x7ffff7dd5000)
+        let interp_base = 0x7ffff7dd5000;
+        let interp_loaded = match elf::load_elf(&interp_buf[..interp_len], interp_base) {
+             Ok(l) => l,
+             Err(e) => {
+                 log::warn!("[syscall::execve] Interpreter load error: {}", e);
+                 return -8; // ENOEXEC
+             }
+        };
+        
+        entry_point = interp_loaded.entry_point;
+        
+        // Auxv for Interpreter
+        auxv.push(elf::AuxvEntry { key: elf::AT_PHDR, val: loaded.phdr_vaddr });
+        auxv.push(elf::AuxvEntry { key: elf::AT_PHENT, val: loaded.phentsize as u64 });
+        auxv.push(elf::AuxvEntry { key: elf::AT_PHNUM, val: loaded.phnum as u64 });
+        auxv.push(elf::AuxvEntry { key: elf::AT_ENTRY, val: loaded.entry_point });
+        auxv.push(elf::AuxvEntry { key: elf::AT_BASE, val: interp_base });
+        auxv.push(elf::AuxvEntry { key: elf::AT_PAGESZ, val: 4096 });
+    } else {
+        // Static Executable
+        log::info!("[syscall::execve] Static executable");
+        entry_point = loaded.entry_point;
+        
+        auxv.push(elf::AuxvEntry { key: elf::AT_PHDR, val: loaded.phdr_vaddr });
+        auxv.push(elf::AuxvEntry { key: elf::AT_PHENT, val: loaded.phentsize as u64 });
+        auxv.push(elf::AuxvEntry { key: elf::AT_PHNUM, val: loaded.phnum as u64 });
+        auxv.push(elf::AuxvEntry { key: elf::AT_PAGESZ, val: 4096 });
+    }
     
     // Parse argv
     let mut argv_vec: Vec<&[u8]> = Vec::new();
@@ -505,32 +564,30 @@ fn sys_execve(pathname: usize, argv: usize, _envp: usize) -> isize {
         }
     }
     
-    // For simplicity, use empty envp for now
+    // Parse envp (simplified)
     let envp_vec: Vec<&[u8]> = Vec::new();
     
-    // Set up new stack at 0x7FFFFF000000 (typical Linux user stack area)
+    // Set up new stack
     let stack_top = 0x7FFFFF000000u64;
-    let stack_size = 8 * 4096; // 32KB stack
+    let stack_size = 128 * 1024; // 128KB stack
     crate::mm::paging::make_user_accessible(stack_top - stack_size, stack_size);
     
-    // Set up stack with argv/envp
-    let user_sp = elf::setup_user_stack(stack_top, &argv_vec, &envp_vec);
+    // Set up stack with argv/envp/auxv
+    let user_sp = elf::setup_user_stack(stack_top, &argv_vec, &envp_vec, &auxv);
     
-    log::info!("[syscall::execve] Stack at 0x{:x}, entering usermode...", user_sp);
+    log::info!("[syscall::execve] Stack at 0x{:x}, entry 0x{:x}", user_sp, entry_point);
     
     // Jump to new program
-    // Note: This replaces the current "process" - we never return
     #[cfg(target_arch = "x86_64")]
     unsafe {
-        crate::arch::x86_64::enter_usermode(loaded.entry_point, user_sp);
+        crate::arch::x86_64::enter_usermode(entry_point, user_sp);
     }
     
     #[cfg(target_arch = "aarch64")]
     unsafe {
-        crate::arch::aarch64::enter_usermode(loaded.entry_point, user_sp);
+        crate::arch::aarch64::enter_usermode(entry_point, user_sp);
     }
     
-    // Should never reach here
     -1
 }
 
