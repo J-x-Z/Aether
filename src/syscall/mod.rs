@@ -56,6 +56,9 @@ pub mod numbers {
 
 /// Main syscall dispatcher
 pub fn dispatch(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
+    // Log all syscalls for debugging
+    log::trace!("[syscall] nr={} arg0=0x{:x} arg1=0x{:x} arg2=0x{:x}", nr, arg0, arg1, arg2);
+    
     match nr {
         // Core I/O
         numbers::SYS_READ => sys_read(arg0, arg1, arg2),
@@ -164,14 +167,18 @@ fn sys_read(fd: usize, buf_ptr: usize, count: usize) -> isize {
 }
 
 fn sys_write(fd: usize, buf_ptr: usize, count: usize) -> isize {
-    // Special handling for stdout/stderr (created empty in task)
+    // Special handling for stdout/stderr - write directly to serial
     if fd == 1 || fd == 2 {
         unsafe {
             let slice = core::slice::from_raw_parts(buf_ptr as *const u8, count);
-            if let Ok(s) = core::str::from_utf8(slice) {
-                // Use kernel console for now
-                // Since this is bare metal, we use console_println from aether-user or just log
-                log::info!("[STDOUT] {}", s);
+            // Output each byte directly to serial port COM1 (0x3F8)
+            for &byte in slice {
+                // Wait for transmitter to be ready
+                #[cfg(target_arch = "x86_64")]
+                {
+                    while (x86_64::instructions::port::Port::<u8>::new(0x3F8 + 5).read() & 0x20) == 0 {}
+                    x86_64::instructions::port::Port::<u8>::new(0x3F8).write(byte);
+                }
             }
         }
         return count as isize;
