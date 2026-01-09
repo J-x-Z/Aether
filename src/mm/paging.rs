@@ -4,129 +4,187 @@
 
 #[cfg(target_arch = "x86_64")]
 mod x86_64_paging {
-    use x86_64::structures::paging::{PageTable, PageTableFlags};
-    use x86_64::PhysAddr;
-    use core::sync::atomic::{AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    
+    /// Recursive page table index (using entry 510 to avoid conflicts with kernel high memory)
+    const RECURSIVE_INDEX: usize = 510;
+    
+    /// Base virtual addresses for recursive page table access
+    /// With recursive index 510:
+    /// PML4:  0xFFFF_FF7F_BFDF_E000
+    /// PDPT:  0xFFFF_FF7F_BFC0_0000 + (pml4_idx * 0x1000)
+    /// PD:    0xFFFF_FF7F_8000_0000 + (pml4_idx * 0x200000) + (pdpt_idx * 0x1000)
+    /// PT:    0xFFFF_FF00_0000_0000 + (pml4_idx * 0x40000000) + (pdpt_idx * 0x200000) + (pd_idx * 0x1000)
+    const PML4_VADDR: u64 = 0xFFFF_FF7F_BFDF_E000;
     
     /// Simple bump allocator for physical frames
-    /// UEFI typically identity-maps first 1-4GB, so we stay in that range
-    /// Start at 32MB to be safe from UEFI reserved areas
     static NEXT_FRAME: AtomicU64 = AtomicU64::new(0x2000000); // 32MB
     
+    /// Flag to track if recursive mapping is set up
+    static RECURSIVE_SETUP: AtomicBool = AtomicBool::new(false);
+    
     fn alloc_frame() -> u64 {
-        let addr = NEXT_FRAME.fetch_add(4096, Ordering::SeqCst);
-        // Zero the frame (important for new page tables)
-        unsafe {
-            core::ptr::write_bytes(addr as *mut u8, 0, 4096);
-        }
-        addr
+        NEXT_FRAME.fetch_add(4096, Ordering::SeqCst)
     }
     
-    /// Get or create a page table entry, allocating intermediate tables as needed
-    /// Returns a mutable reference to the final page table entry
-    unsafe fn get_or_create_pte(vaddr: u64) -> *mut u64 {
-        let pml4_addr = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
+    /// Set up recursive page table mapping
+    /// This maps PML4[RECURSIVE_INDEX] to point to PML4 itself
+    pub fn setup_recursive_mapping() {
+        if RECURSIVE_SETUP.swap(true, Ordering::SeqCst) {
+            return; // Already set up
+        }
         
+        unsafe {
+            let cr3 = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
+            
+            // UEFI guarantees that the current page tables are accessible
+            // We need to find the virtual address of PML4
+            // In UEFI, low memory is typically identity-mapped, so we try that first
+            // But if CR3 is at a high address, UEFI must have mapped it somewhere
+            
+            // For UEFI, we assume identity mapping for the first few GB
+            // If CR3 is below 1GB, it should be identity-mapped
+            if cr3 < 0x40000000 { // 1GB
+                let pml4 = cr3 as *mut u64;
+                let entry = pml4.add(RECURSIVE_INDEX);
+                
+                // Set PML4[RECURSIVE_INDEX] = CR3 | PRESENT | WRITABLE
+                *entry = cr3 | 0x3; // Don't set USER bit on recursive entry
+                
+                // Flush TLB
+                x86_64::instructions::tlb::flush_all();
+                
+                log::info!("[Paging] Recursive mapping set up at PML4[{}]", RECURSIVE_INDEX);
+            } else {
+                // CR3 is at high address, we need to find another way
+                // This is unusual for UEFI, log a warning
+                log::warn!("[Paging] CR3 at high address 0x{:x}, recursive mapping may fail", cr3);
+                
+                // Still try - UEFI might have it mapped somewhere
+                // Use the physical address directly (this may page fault if not identity-mapped)
+                let pml4 = cr3 as *mut u64;
+                let entry = pml4.add(RECURSIVE_INDEX);
+                *entry = cr3 | 0x3;
+                x86_64::instructions::tlb::flush_all();
+            }
+        }
+    }
+    
+    /// Get virtual address to access a specific page table level using recursive mapping
+    /// level: 4=PML4, 3=PDPT, 2=PD, 1=PT
+    fn recursive_table_addr(vaddr: u64, level: u8) -> u64 {
+        let ri = RECURSIVE_INDEX as u64;
+        
+        let pml4_idx = (vaddr >> 39) & 0x1FF;
+        let pdpt_idx = (vaddr >> 30) & 0x1FF;
+        let pd_idx = (vaddr >> 21) & 0x1FF;
+        let pt_idx = (vaddr >> 12) & 0x1FF;
+        
+        // Sign extend for canonical form
+        let sign = 0xFFFF_0000_0000_0000u64;
+        
+        match level {
+            4 => sign | (ri << 39) | (ri << 30) | (ri << 21) | (ri << 12),
+            3 => sign | (ri << 39) | (ri << 30) | (ri << 21) | (pml4_idx << 12),
+            2 => sign | (ri << 39) | (ri << 30) | (pml4_idx << 21) | (pdpt_idx << 12),
+            1 => sign | (ri << 39) | (pml4_idx << 30) | (pdpt_idx << 21) | (pd_idx << 12),
+            _ => 0,
+        }
+    }
+    
+    /// Ensure a page is mapped and accessible to user mode
+    unsafe fn map_page_user(vaddr: u64) {
         let pml4_idx = ((vaddr >> 39) & 0x1FF) as usize;
         let pdpt_idx = ((vaddr >> 30) & 0x1FF) as usize;
         let pd_idx = ((vaddr >> 21) & 0x1FF) as usize;
         let pt_idx = ((vaddr >> 12) & 0x1FF) as usize;
         
-        // PML4 -> PDPT
-        let pml4 = pml4_addr as *mut u64;
-        let pml4_entry = pml4.add(pml4_idx);
+        // Access PML4 via recursive mapping
+        let pml4_table = recursive_table_addr(vaddr, 4) as *mut u64;
+        let pml4_entry = pml4_table.add(pml4_idx);
         
-        let pdpt_addr = if *pml4_entry & 1 == 0 {
-            // Not present, allocate new PDPT
-            let new_pdpt = alloc_frame();
-            *pml4_entry = new_pdpt | 0x7; // PRESENT | WRITABLE | USER
-            new_pdpt
-        } else {
-            *pml4_entry & !0xFFF
-        };
+        if *pml4_entry & 1 == 0 {
+            // Allocate PDPT
+            let frame = alloc_frame();
+            // Zero the frame by mapping it temporarily (we'll use it through recursive mapping)
+            *pml4_entry = frame | 0x7; // PRESENT | WRITABLE | USER
+            x86_64::instructions::tlb::flush_all();
+            // Zero the new table
+            let pdpt_table = recursive_table_addr(vaddr, 3) as *mut u8;
+            core::ptr::write_bytes(pdpt_table, 0, 4096);
+        }
+        *pml4_entry |= 0x7;
         
-        // Ensure USER bit is set on PML4 entry
-        *pml4_entry |= 0x7; // PRESENT | WRITABLE | USER
-        
-        // PDPT -> PD
-        let pdpt = pdpt_addr as *mut u64;
-        let pdpt_entry = pdpt.add(pdpt_idx);
+        // Access PDPT
+        let pdpt_table = recursive_table_addr(vaddr, 3) as *mut u64;
+        let pdpt_entry = pdpt_table.add(pdpt_idx);
         
         // Check for 1GB huge page
         if *pdpt_entry & 0x80 != 0 {
-            // This is a 1GB page, we can't subdivide it easily
-            // Just set USER bit and return
-            *pdpt_entry |= 0x4; // USER
-            return pdpt_entry;
+            *pdpt_entry |= 0x4; // Set USER bit
+            return;
         }
         
-        let pd_addr = if *pdpt_entry & 1 == 0 {
-            let new_pd = alloc_frame();
-            *pdpt_entry = new_pd | 0x7;
-            new_pd
-        } else {
-            *pdpt_entry & !0xFFF
-        };
-        
+        if *pdpt_entry & 1 == 0 {
+            let frame = alloc_frame();
+            *pdpt_entry = frame | 0x7;
+            x86_64::instructions::tlb::flush_all();
+            let pd_table = recursive_table_addr(vaddr, 2) as *mut u8;
+            core::ptr::write_bytes(pd_table, 0, 4096);
+        }
         *pdpt_entry |= 0x7;
         
-        // PD -> PT
-        let pd = pd_addr as *mut u64;
-        let pd_entry = pd.add(pd_idx);
+        // Access PD
+        let pd_table = recursive_table_addr(vaddr, 2) as *mut u64;
+        let pd_entry = pd_table.add(pd_idx);
         
         // Check for 2MB huge page
         if *pd_entry & 0x80 != 0 {
-            *pd_entry |= 0x4; // USER
-            return pd_entry;
+            *pd_entry |= 0x4;
+            return;
         }
         
-        let pt_addr = if *pd_entry & 1 == 0 {
-            let new_pt = alloc_frame();
-            *pd_entry = new_pt | 0x7;
-            new_pt
-        } else {
-            *pd_entry & !0xFFF
-        };
-        
+        if *pd_entry & 1 == 0 {
+            let frame = alloc_frame();
+            *pd_entry = frame | 0x7;
+            x86_64::instructions::tlb::flush_all();
+            let pt_table = recursive_table_addr(vaddr, 1) as *mut u8;
+            core::ptr::write_bytes(pt_table, 0, 4096);
+        }
         *pd_entry |= 0x7;
         
-        // Return pointer to PT entry
-        let pt = pt_addr as *mut u64;
-        pt.add(pt_idx)
+        // Access PT
+        let pt_table = recursive_table_addr(vaddr, 1) as *mut u64;
+        let pt_entry = pt_table.add(pt_idx);
+        
+        if *pt_entry & 1 == 0 {
+            let frame = alloc_frame();
+            *pt_entry = frame | 0x7; // PRESENT | WRITABLE | USER
+        } else {
+            *pt_entry |= 0x4; // Add USER bit
+        }
     }
     
     /// Ensure a range of addresses is accessible to User Mode (Ring 3)
-    /// This allocates new pages if needed and sets USER bit on all levels
     pub fn make_user_accessible(start_addr: u64, len: u64) {
         if len == 0 { return; }
         
-        let start = start_addr & !0xFFF; // Page align
+        // Ensure recursive mapping is set up
+        setup_recursive_mapping();
+        
+        let start = start_addr & !0xFFF;
         let end = (start_addr + len + 0xFFF) & !0xFFF;
         
         log::debug!("[Paging] Making 0x{:x}-0x{:x} user accessible", start, end);
         
         let mut addr = start;
         while addr < end {
-            unsafe {
-                let pte = get_or_create_pte(addr);
-                
-                if *pte & 1 == 0 {
-                    // Not present, allocate a new frame
-                    let frame = alloc_frame();
-                    *pte = frame | 0x7; // PRESENT | WRITABLE | USER
-                    log::trace!("[Paging] Mapped 0x{:x} -> 0x{:x}", addr, frame);
-                } else {
-                    // Already present, just add USER bit
-                    *pte |= 0x4; // USER
-                }
-            }
+            unsafe { map_page_user(addr); }
             addr += 4096;
         }
         
-        // Flush TLB
-        unsafe {
-            x86_64::instructions::tlb::flush_all();
-        }
+        // Final TLB flush
+        unsafe { x86_64::instructions::tlb::flush_all(); }
     }
 }
 
