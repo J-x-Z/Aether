@@ -1,6 +1,6 @@
 //! POSIX Syscall Interface
 
-mod elf;
+pub mod elf;
 pub mod dynlink;
 
 use crate::sched::queue::CURRENT_TASK;

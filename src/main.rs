@@ -61,39 +61,53 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     log::info!("[Kernel] Initializing Drivers...");
     drivers::init();
     
-    // 7. Load Init Process
-    log::info!("[Kernel] Loading /init...");
-    if let Ok(inode) = fs::open("/init", 0) {
-        // Allocate buffer for init (64KB max for now)
-        let mut buffer = alloc::vec![0u8; 65536];
+    // 7. Load Init Process (BusyBox shell)
+    log::info!("[Kernel] Loading /bin/busybox...");
+    if let Ok(inode) = fs::open("/bin/busybox", 0) {
+        // Allocate buffer for busybox (2MB max)
+        let mut buffer = alloc::vec![0u8; 2 * 1024 * 1024];
         let len = inode.read_at(0, &mut buffer);
-        log::info!("[Kernel] Read init: {} bytes", len);
+        log::info!("[Kernel] Read busybox: {} bytes", len);
         
-        if len > 0 {
-            // Map Userspace Memory (Code: 0x400000)
-            let code_addr = 0x400000;
-            mm::paging::make_user_accessible(code_addr, len as u64);
+        if len > 64 {
+            use crate::syscall::elf::{load_elf, setup_user_stack, AuxvEntry, AT_PAGESZ};
             
-            // Map Userspace Stack (Stack: 0x600000)
-            let stack_addr = 0x600000;
-            let stack_size = 4096 * 4;
-            mm::paging::make_user_accessible(stack_addr, stack_size as u64);
-            
-            // Copy Code to Userspace Address
-            unsafe {
-                core::ptr::copy_nonoverlapping(buffer.as_ptr(), code_addr as *mut u8, len);
-            }
-            
-            log::info!("[Kernel] Entering Userspace (Ring 3)...");
-            
-            // Jump to Ring 3
-            // Stack grows down, so pointer is top of stack region
-            unsafe {
-                arch::enter_usermode(code_addr, stack_addr + stack_size as u64);
+            // Load ELF (static binary, base = 0)
+            match load_elf(&buffer[..len], 0) {
+                Ok(loaded) => {
+                    log::info!("[Kernel] BusyBox loaded, entry: 0x{:x}", loaded.entry_point);
+                    
+                    // Set up Auxv
+                    let auxv = alloc::vec![
+                        AuxvEntry { key: AT_PAGESZ, val: 4096 },
+                    ];
+                    
+                    // argv: "sh" (BusyBox multi-call binary uses argv[0] to determine behavior)
+                    let argv: &[&[u8]] = &[b"sh"];
+                    let envp: &[&[u8]] = &[];
+                    
+                    // Set up stack (at high address)
+                    let stack_top = 0x7FFFFF000000u64;
+                    let stack_size = 128 * 1024; // 128KB
+                    mm::paging::make_user_accessible(stack_top - stack_size, stack_size);
+                    
+                    let user_sp = setup_user_stack(stack_top, argv, envp, &auxv);
+                    
+                    log::info!("[Kernel] Entering BusyBox shell (Ring 3)...");
+                    log::info!("[Kernel]   Entry: 0x{:x}, Stack: 0x{:x}", loaded.entry_point, user_sp);
+                    
+                    // Jump to Ring 3
+                    unsafe {
+                        arch::enter_usermode(loaded.entry_point, user_sp);
+                    }
+                }
+                Err(e) => {
+                    log::error!("[Kernel] Failed to load BusyBox ELF: {}", e);
+                }
             }
         }
     } else {
-        log::error!("[Kernel] Failed to open /init");
+        log::error!("[Kernel] Failed to open /bin/busybox");
     }
 
     log::error!("[Kernel] Init failed or returned!");
