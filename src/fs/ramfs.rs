@@ -25,6 +25,24 @@ impl RamFS {
              children.insert(String::from(name), Arc::new(RamNode::new_file(content)));
          }
     }
+    
+    /// Add a directory to root
+    pub fn add_dir(&self, name: &str) -> Arc<RamNode> {
+        let dir = Arc::new(RamNode::new_dir());
+        let mut guard = self.root.data.write();
+        if let RamNodeData::Directory { children } = &mut *guard {
+            children.insert(String::from(name), dir.clone());
+        }
+        dir
+    }
+    
+    /// Add a file to a subdirectory
+    pub fn add_file_to_dir(&self, dir: &Arc<RamNode>, name: &str, content: Vec<u8>) {
+        let mut guard = dir.data.write();
+        if let RamNodeData::Directory { children } = &mut *guard {
+            children.insert(String::from(name), Arc::new(RamNode::new_file(content)));
+        }
+    }
 }
 
 impl FileSystem for RamFS {
@@ -34,8 +52,8 @@ impl FileSystem for RamFS {
 }
 
 /// Node in RamFS (File or Directory)
-struct RamNode {
-    data: RwLock<RamNodeData>,
+pub struct RamNode {
+    pub(crate) data: RwLock<RamNodeData>,
 }
 
 enum RamNodeData {

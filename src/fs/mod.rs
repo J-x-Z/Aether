@@ -34,6 +34,15 @@ pub fn init() {
     ramfs.add_file("init", init_data);
     log::info!("[VFS] Added /init to RamFS");
     
+    // Create /bin directory and add BusyBox
+    let bin_dir = ramfs.add_dir("bin");
+    let busybox_data = initrd::load_busybox();
+    ramfs.add_file_to_dir(&bin_dir, "busybox", busybox_data);
+    log::info!("[VFS] Added /bin/busybox to RamFS");
+    
+    // Create symlinks for common commands (as files pointing to busybox for now)
+    // In a real VFS, these would be actual symlinks
+    
     let root = ramfs.root_inode();
     *ROOT.write() = Some(root);
     log::info!("[VFS] Mounted ROOT (RamFS)");
