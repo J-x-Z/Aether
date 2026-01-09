@@ -167,17 +167,15 @@ fn sys_read(fd: usize, buf_ptr: usize, count: usize) -> isize {
 }
 
 fn sys_write(fd: usize, buf_ptr: usize, count: usize) -> isize {
-    // Special handling for stdout/stderr - write directly to serial
+    // Special handling for stdout/stderr
     if fd == 1 || fd == 2 {
         unsafe {
             let slice = core::slice::from_raw_parts(buf_ptr as *const u8, count);
-            // Output each byte directly to serial port COM1 (0x3F8)
-            for &byte in slice {
-                // Wait for transmitter to be ready
-                #[cfg(target_arch = "x86_64")]
-                {
-                    while (x86_64::instructions::port::Port::<u8>::new(0x3F8 + 5).read() & 0x20) == 0 {}
-                    x86_64::instructions::port::Port::<u8>::new(0x3F8).write(byte);
+            // Print each character via log
+            if let Ok(s) = core::str::from_utf8(slice) {
+                // Use print! style - each line separately
+                for line in s.lines() {
+                    log::info!("{}", line);
                 }
             }
         }
