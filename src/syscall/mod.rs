@@ -316,13 +316,33 @@ fn sys_read(fd: usize, buf_ptr: usize, count: usize) -> isize {
         let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, count) };
         let mut nread = 0;
         
-        // Try to read at least one char (from buffer OR hardware)
+        // Enable interrupts for the entire syscall (needed to receive serial IRQ)
+        unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+        
+        // BLOCKING READ: Wait for at least one character
+        loop {
+            // Try console_input buffer first (keyboard/serial IRQ)
+            if let Some(c) = crate::drivers::console_input::pop_char() {
+                buf[nread] = c;
+                nread += 1;
+                break;
+            }
+            // Fallback: Direct serial poll
+            if let Some(c) = crate::drivers::console::read_serial() {
+                buf[nread] = c;
+                nread += 1;
+                break;
+            }
+            // No data - halt CPU until next interrupt
+            unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
+        }
+        
+        // Read more if available (non-blocking)
         while nread < count {
             if let Some(c) = crate::drivers::console_input::pop_char() {
                 buf[nread] = c;
                 nread += 1;
             } else if let Some(c) = crate::drivers::console::read_serial() {
-                // Fallback: Poll hardware directly
                 buf[nread] = c;
                 nread += 1;
             } else {
@@ -330,14 +350,7 @@ fn sys_read(fd: usize, buf_ptr: usize, count: usize) -> isize {
             }
         }
         
-        if nread > 0 {
-            return nread as isize;
-        } else {
-            // No data available
-            // If strict blocking is needed, we should yield.
-            // For now, return EAGAIN to let busybox poll.
-            return -11; // EAGAIN
-        }
+        return nread as isize;
     }
 
     let current_lock = CURRENT_TASK.lock();
