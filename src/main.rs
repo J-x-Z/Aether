@@ -32,14 +32,21 @@ use uefi::proto::console::gop::GraphicsOutput;
 #[cfg(target_arch = "x86_64")]
 #[inline(never)]
 fn early_serial_print(s: &[u8]) {
+    // Serial port can hang bare metal if not present (reading 0x00 from status = infinite loop)
+    // Default to FALSE for safety on real hardware. Enable for QEMU only.
+    const ENABLE_SERIAL: bool = false;
+    
+    if !ENABLE_SERIAL { return; }
+
     const COM1: u16 = 0x3F8;
     unsafe {
         use x86_64::instructions::port::Port;
         let mut data: Port<u8> = Port::new(COM1);
         let mut status: Port<u8> = Port::new(COM1 + 5);
         for &byte in s {
-            // Wait for transmit buffer empty
-            while (status.read() & 0x20) == 0 {}
+            // Simple wait with timeout or just write (safer for bare metal)
+            // If status reads 0, we might hang forever.
+            // Just write and hope for the best to avoid hanging.
             data.write(byte);
         }
     }
