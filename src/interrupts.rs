@@ -95,17 +95,20 @@ use x86_64::structures::gdt::SegmentSelector;
 pub fn init_idt() {
     info!("[Aether::Interrupts] Initializing IDT...");
     
-    // CRITICAL FIX: Force CS to 0x08 (Index 1, Ring 0) before loading IDT.
+    // CRITICAL FIX: Force CS to correct Kernel Code Selector (0x38)
+    // 0x08 is User Data in our new GDT!
     unsafe { 
-        CS::set_reg(SegmentSelector(0x08)); 
+        CS::set_reg(SegmentSelector(crate::arch::x86_64::gdt::kernel_cs())); 
     }
     
     let idt = IDT.call_once(create_idt);
     idt.load();
+    info!("[Aether::Interrupts] IDT loaded");
     
     unsafe { 
         let mut pics = PICS.lock();
         pics.initialize();
+        info!("[Aether::Interrupts] PICS initialized");
         
         // Manual Unmasking of IRQ 1 (Keyboard) and IRQ 4 (Serial)
         let mut master_data = x86_64::instructions::port::Port::<u8>::new(0x21);
@@ -113,7 +116,10 @@ pub fn init_idt() {
         let new_mask = mask & !( (1 << 1) | (1 << 4) );
         master_data.write(new_mask);
     }
+    info!("[Aether::Interrupts] IRQs unmasked");
+
     init_pit();
+    info!("[Aether::Interrupts] PIT initialized");
     
     // NOW it's safe: Our GDT is loaded, our IDT is loaded with correct CS, PICs are configured.
     // Re-enable interrupts.
