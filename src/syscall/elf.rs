@@ -59,17 +59,36 @@ pub struct LoadedSegment {
     pub size: u64,
 }
 
+// Helper for stalling without SystemTable (Busy Loop)
+fn stall(approx_ms: u64) {
+    // Approx 100M cycles per second? Very rough.
+    // loops = ms * 100_000
+    let loops = approx_ms * 100_000;
+    for _ in 0..loops {
+        core::hint::spin_loop();
+    }
+}
+
 /// Parse and load ELF from buffer
 pub fn load_elf(data: &[u8], base_addr: u64) -> Result<LoadedElf, &'static str> {
+    log::info!("[ELF] DEBUG: load_elf called. Data: {:p}, Len: {}", data.as_ptr(), data.len());
+    stall(100);
+
     if data.len() < core::mem::size_of::<Elf64Header>() {
         return Err("Data too small for ELF header");
     }
     
+    log::info!("[ELF] DEBUG: Parsing header...");
+    stall(100);
+
     // Parse header
     let header = unsafe {
         core::ptr::read(data.as_ptr() as *const Elf64Header)
     };
     
+    log::info!("[ELF] DEBUG: Header parsed. Magic: {:x?}", header.e_ident);
+    stall(100);
+
     // Verify magic
     if header.e_ident[0..4] != ELF_MAGIC {
         return Err("Invalid ELF magic");
@@ -81,11 +100,15 @@ pub fn load_elf(data: &[u8], base_addr: u64) -> Result<LoadedElf, &'static str> 
     }
     
     log::info!("[ELF] Entry point: 0x{:x}, Base: 0x{:x}", header.e_entry, base_addr);
+    stall(100);
     
     let mut segments = Vec::new();
     let mut interp = None;
     let mut phdr_vaddr = 0;
     
+    log::info!("[ELF] DEBUG: Loading {} segments...", header.e_phnum);
+    stall(100);
+
     // Load program headers
     for i in 0..header.e_phnum {
         let phdr_offset = header.e_phoff as usize + (i as usize * header.e_phentsize as usize);
@@ -108,16 +131,21 @@ pub fn load_elf(data: &[u8], base_addr: u64) -> Result<LoadedElf, &'static str> 
             }
             
             log::info!(
-                "[ELF] LOAD: vaddr=0x{:x}, filesz={}, memsz={}", 
-                vaddr, phdr.p_filesz, phdr.p_memsz
+                "[ELF] LOAD Segment {}: vaddr=0x{:x}, filesz={}, memsz={}", 
+                i, vaddr, phdr.p_filesz, phdr.p_memsz
             );
+            stall(100);
             
             // Map memory region
+            log::info!("[ELF] DEBUG: Mapping memory...");
             crate::mm::paging::make_user_accessible(vaddr, phdr.p_memsz);
+            log::info!("[ELF] DEBUG: Memory mapped.");
+            stall(50);
             
             // Copy segment data
             let src = &data[phdr.p_offset as usize..(phdr.p_offset + phdr.p_filesz) as usize];
             unsafe {
+                log::info!("[ELF] DEBUG: Copying data ({} bytes)...", phdr.p_filesz);
                 core::ptr::copy_nonoverlapping(
                     src.as_ptr(),
                     vaddr as *mut u8,
@@ -128,9 +156,12 @@ pub fn load_elf(data: &[u8], base_addr: u64) -> Result<LoadedElf, &'static str> 
                 if phdr.p_memsz > phdr.p_filesz {
                     let bss_start = (vaddr + phdr.p_filesz) as *mut u8;
                     let bss_size = (phdr.p_memsz - phdr.p_filesz) as usize;
+                    log::info!("[ELF] DEBUG: Zeroing BSS ({} bytes)...", bss_size);
                     core::ptr::write_bytes(bss_start, 0, bss_size);
                 }
             }
+            log::info!("[ELF] DEBUG: Segment loaded.");
+            stall(50);
             
             segments.push(LoadedSegment {
                 vaddr,
@@ -151,6 +182,9 @@ pub fn load_elf(data: &[u8], base_addr: u64) -> Result<LoadedElf, &'static str> 
         }
     }
     
+    log::info!("[ELF] LOAD COMPLETE");
+    stall(100);
+
     Ok(LoadedElf {
         entry_point: base_addr + header.e_entry,
         segments,

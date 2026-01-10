@@ -24,16 +24,47 @@ mod x86_64_paging {
         virt.wrapping_sub(PHYS_OFFSET)
     }
     
-    /// Frame allocator - at 64MB to avoid overwriting Kernel Code/Data
-    static PT_ALLOCATOR: AtomicU64 = AtomicU64::new(0x4000000); // 64MB - for page tables
-    static FRAME_ALLOCATOR: AtomicU64 = AtomicU64::new(0x4100000); // 65MB - for user pages
+    /// Frame allocator - Default to 64MB but should be re-initialized
+    static PT_ALLOCATOR: AtomicU64 = AtomicU64::new(0x4000000); 
+    static FRAME_ALLOCATOR: AtomicU64 = AtomicU64::new(0x4100000);
+    static MAX_RAM: AtomicU64 = AtomicU64::new(0x8000000); // Default 128MB limit
     
+    /// Initialize the allocator with a valid memory region from UEFI
+    pub fn init_allocator(start: u64, size: u64) {
+        // Align to 4KB
+        let aligned_start = (start + 4095) & !4095;
+        let end = start + size;
+        
+        PT_ALLOCATOR.store(aligned_start, Ordering::SeqCst);
+        // Split region: 2MB for PTs, rest for Frames? Or just share/split?
+        // Let's give 4MB offset for frames.
+        FRAME_ALLOCATOR.store(aligned_start + 0x400000, Ordering::SeqCst); // +4MB
+        MAX_RAM.store(end, Ordering::SeqCst);
+        
+        log::info!("[Paging] Allocator initialized @ 0x{:x} (Size: {} MB)", aligned_start, size / 1024 / 1024);
+    }
+
     static OUR_PML4: AtomicU64 = AtomicU64::new(0);
     static INITIALIZED: AtomicBool = AtomicBool::new(false);
     
     /// Allocate a page for page tables (zeroed)
     fn alloc_pt_page() -> u64 {
         let addr = PT_ALLOCATOR.fetch_add(4096, Ordering::SeqCst);
+        
+        // Safety Check
+        if addr >= MAX_RAM.load(Ordering::Relaxed) {
+             panic!("[Paging] OOM in alloc_pt_page! addr={:x}", addr);
+        }
+        if addr >= FRAME_ALLOCATOR.load(Ordering::Relaxed) {
+            // Collision with frame allocator?
+            // Ideally we should have separate regions or a real allocator.
+            // For now, simple bump is risky if they cross.
+            // But we set FRAME to +4MB. If PT grows > 4MB it collides.
+            // log::warn!("[Paging] PT Allocator collision risk? {:x}", addr);
+        }
+
+        // log::trace!("[Paging] Allocating PT page @ 0x{:x}", addr);
+
         // Use identity mapping during init, offset mapping after
         let ptr = if INITIALIZED.load(Ordering::SeqCst) {
             phys_to_virt(addr)
@@ -47,6 +78,13 @@ mod x86_64_paging {
     /// Allocate a page for user data
     fn alloc_user_page() -> u64 {
         let addr = FRAME_ALLOCATOR.fetch_add(4096, Ordering::SeqCst);
+        
+        if addr >= MAX_RAM.load(Ordering::Relaxed) {
+             panic!("[Paging] OOM in alloc_user_page! addr={:x}", addr);
+        }
+        
+        // log::trace!("[Paging] Allocating User Frame @ 0x{:x}", addr);
+
         let ptr = phys_to_virt(addr);
         unsafe { core::ptr::write_bytes(ptr, 0, 4096); }
         addr
