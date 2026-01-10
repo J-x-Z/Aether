@@ -172,7 +172,7 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // 6. Initialize Drivers
     log::info!("[Kernel] Initializing Drivers...");
     drivers::init();
-    system_table.boot_services().stall(30_000_000); // STALL 30s
+    system_table.boot_services().stall(1_000_000); // STALL 1s
 
     // 7. Enable Interrupts (NOW it's safe)
     #[cfg(target_arch = "x86_64")]
@@ -180,7 +180,7 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         interrupts::enable();
         log::info!("[Kernel] Interrupts ENABLED");
     }
-    system_table.boot_services().stall(30_000_000); // STALL 30s
+    system_table.boot_services().stall(3_000_000); // STALL 3s
     
     // For testing: set to true to use simple init.bin instead of BusyBox
     const USE_SIMPLE_INIT: bool = false;
@@ -188,15 +188,14 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // 7. Load Init Process
     let init_path = if USE_SIMPLE_INIT { "/init" } else { "/bin/busybox" };
     log::info!("[Kernel] Loading {}...", init_path);
-    system_table.boot_services().stall(30_000_000); // STALL 30s
+    // system_table.boot_services().stall(1_000_000); // STALL
 
     log::info!("[Kernel] DEBUG: About to call fs::open");
-    system_table.boot_services().stall(30_000_000); // STALL 30s
+    // system_table.boot_services().stall(1_000_000); // STALL
 
     if let Ok(inode) = fs::open(init_path, 0) {
         log::info!("[Kernel] DEBUG: fs::open succeeded");
-        system_table.boot_services().stall(30_000_000); // STALL 30s
-
+        
         // Allocate buffer for binary (2MB max)
         log::info!("[Kernel] DEBUG: Allocating 2MB buffer...");
         let mut buffer = alloc::vec![0u8; 2 * 1024 * 1024];
@@ -204,19 +203,19 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         let len = inode.read_at(0, &mut buffer);
         log::info!("[Kernel] Read {}: {} bytes", init_path, len);
         
-        system_table.boot_services().stall(30_000_000); // STALL 30s
+        system_table.boot_services().stall(1_000_000); // STALL 1s
 
         if len > 64 {
             use crate::syscall::elf::{load_elf, setup_user_stack, AuxvEntry, AT_PAGESZ};
             
             log::info!("[Kernel] DEBUG: About to load ELF...");
-            system_table.boot_services().stall(30_000_000); // STALL 30s
+            system_table.boot_services().stall(3_000_000); // STALL 3s
 
             // Load ELF (static binary, base = 0)
             match load_elf(&buffer[..len], 0) {
                 Ok(loaded) => {
                     log::info!("[Kernel] BusyBox loaded, entry: 0x{:x}", loaded.entry_point);
-                    system_table.boot_services().stall(30_000_000); // STALL 30s
+                    system_table.boot_services().stall(3_000_000); // STALL 3s
                     
                     // Set up Auxv
                     let auxv = alloc::vec![
@@ -253,7 +252,7 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                     core::mem::forget(kernel_stack);
 
                     log::info!("[Kernel] STALL before User Mode...");
-                    system_table.boot_services().stall(30_000_000); // LONG STALL 30s
+                    system_table.boot_services().stall(5_000_000); // LONG STALL 5s
 
                     // Jump to Ring 3
                     unsafe {
@@ -270,7 +269,7 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     }
 
     log::error!("[Kernel] Init failed or returned!");
-    system_table.boot_services().stall(30_000_000); // STALL
+    system_table.boot_services().stall(30_000_000); // STALL for error reading
     
     // Halt Loop
     loop {
