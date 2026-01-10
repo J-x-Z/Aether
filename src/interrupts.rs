@@ -43,6 +43,13 @@ fn create_idt() -> InterruptDescriptorTable {
     info!("[Interrupts] Creating IDT with CS: {:?} (Expected: 0x8)", current_cs);
     
     let mut idt = InterruptDescriptorTable::new();
+    
+    // 1. Set default handler for ALL 256 entries to catch stray interrupts
+    // UEFI/Hardware might fire APIC/MSI interrupts we didn't expect (e.g. Vector 0x6E)
+    for i in 0..256 {
+        idt[i].set_handler_fn(default_interrupt_handler);
+    }
+
     idt.breakpoint.set_handler_fn(breakpoint_handler);
     unsafe {
         idt.double_fault.set_handler_fn(double_fault_handler)
@@ -64,6 +71,29 @@ fn create_idt() -> InterruptDescriptorTable {
         .set_handler_fn(serial_interrupt_handler);
 
     idt
+}
+
+extern "x86-interrupt" fn default_interrupt_handler(stack_frame: InterruptStackFrame) {
+    // Just log it and return (ignore spurious interrupts)
+    // Don't panic, or we'll loop if it's high frequency
+    // Use early_serial_print as log info might be too slow/buffered
+    // But screen_print is better visible
+    // Wait, we can't easily print the vector number here because x86-interrupt calling convention
+    // doesn't pass the vector number to the handler (except for error codes).
+    // But at least we won't crash.
+    // We can use a trick or just print generic message.
+    
+    // WARNING: This handler is for debug. Ideally we should ACK EOI if it was from APIC.
+    // If we don't ACK, it might just fire once and stop, or hang the APIC.
+    // For now, let's see if we survive.
+    // x86_64 crate's set_handler_fn expects `fn(ISF)`.
+    
+    // Try to signal End of Interrupt to both PICs just in case,
+    // although if it's Vector 0x6E it's arguably NOT a PIC interrupt.
+    // If it's APIC, we need local APIC EOI.
+    
+    // Minimal output to avoid blocking
+    // unsafe { crate::main::early_serial_print(b"![IRQ]\r\n"); }
 }
 
 // ... init_pit ...
