@@ -1,10 +1,9 @@
 //! Global Descriptor Table (GDT)
 //! 
 //! Custom GDT implementation with 16 entries to support:
-//! - Kernel/User segments
-//! - TSS (2 slots)
+//! - Standard Kernel Segments at 0x8/0x10 (Fixes IDT crash)
 //! - UEFI compatibility padding (0x30, 0x38)
-//! - Syscall requirements (Contiguous Code+Data)
+//! - Syscall/Sysret requirements (Contiguous segments)
 
 use x86_64::structures::tss::TaskStateSegment;
 use x86_64::structures::gdt::SegmentSelector;
@@ -26,7 +25,6 @@ static TSS: Lazy<TaskStateSegment> = Lazy::new(|| {
 });
 
 /// Custom GDT struct because x86_64 crate's GDT is fixed to 8 entries
-/// We need more for UEFI layout compatibility + Syscall requirements
 #[repr(C)]
 pub struct CustomGdt {
     entries: [u64; 16],
@@ -50,16 +48,14 @@ impl CustomGdt {
     
     /// Add a 16-byte TSS descriptor (takes 2 slots)
     pub fn add_tss(&mut self, index: usize, tss: &'static TaskStateSegment) -> SegmentSelector {
-        use x86_64::structures::gdt::Descriptor;
         assert!(index + 1 < 16, "GDT TSS index out of bounds");
         
         let ptr = tss as *const _ as u64;
         let limit = (core::mem::size_of::<TaskStateSegment>() - 1) as u64;
         
         // Manual TSS Descriptor construction (System Segment)
-        // System descriptors are 16 bytes in Long Mode.
         // Base[0-23] @ 16-39
-        // Access Byte (P, DPL, Type) @ 40-47
+        // Access Byte (P, DPL, Type) @ 40-47 (0x89 << 40)
         // Limit[16-19] + Flags @ 48-55
         // Base[24-31] @ 56-63
         
@@ -120,30 +116,34 @@ static GDT: Lazy<(CustomGdt, Selectors)> = Lazy::new(|| {
     
     // Layout Plan:
     // 0: Null
-    // 1: User Data (0x8)
-    // 2: User Code (0x10)
-    // 3: TSS Low  (0x18)
-    // 4: TSS High (0x20)
-    // 5: Padding  (0x28) - Kernel Data (dummy)
-    // 6: Kernel Data (0x30) - Matches UEFI SS/DS
-    // 7: Kernel Code (0x38) - Matches UEFI CS (and Syscall CS)
-    // 8: Kernel Data (0x40) - Syscall SS
+    // 1: Kernel Code (0x8)  <- Standard defaults (fixes IDT crash)
+    // 2: Kernel Data (0x10) <- Standard defaults
+    // 3: TSS Low
+    // 4: TSS High
+    // 5: Padding (0x28)
+    // 6: Kernel Data (0x30) [UEFI Compatible]
+    // 7: Kernel Code (0x38) [UEFI Compatible]
+    // 8: Kernel Data (0x40) [Base for SYSRET]
+    // 9: User Data (0x48)   [SYSRET SS]
+    // 10: User Code (0x50)  [SYSRET CS]
     
-    let user_data_selector = gdt.add_entry_at(1, USER_DATA_VAL); // 0x8 | R3
-    let user_code_selector = gdt.add_entry_at(2, USER_CODE_VAL); // 0x10 | R3
+    let kernel_code_selector = gdt.add_entry_at(1, KERNEL_CODE_VAL); // 0x8
+    let kernel_data_selector = gdt.add_entry_at(2, KERNEL_DATA_VAL); // 0x10
     
-    // Adjust selectors to Ring 3
-    let user_data_selector = SegmentSelector::new(1, PrivilegeLevel::Ring3);
-    let user_code_selector = SegmentSelector::new(2, PrivilegeLevel::Ring3);
-
     let tss_selector = gdt.add_tss(3, &TSS); // 0x18
     
     gdt.add_entry_at(5, KERNEL_DATA_VAL); // 0x28
     
-    let uefi_data_compatible = gdt.add_entry_at(6, KERNEL_DATA_VAL); // 0x30
+    gdt.add_entry_at(6, KERNEL_DATA_VAL); // 0x30 (UEFI SS)
+    gdt.add_entry_at(7, KERNEL_CODE_VAL); // 0x38 (UEFI CS)
     
-    let kernel_code_selector = gdt.add_entry_at(7, KERNEL_CODE_VAL); // 0x38
-    let kernel_data_selector = gdt.add_entry_at(8, KERNEL_DATA_VAL); // 0x40
+    gdt.add_entry_at(8, KERNEL_DATA_VAL); // 0x40 (SYSRET Base)
+    
+    gdt.add_entry_at(9, USER_DATA_VAL);   // 0x48 (SYSRET SS)
+    gdt.add_entry_at(10, USER_CODE_VAL);  // 0x50 (SYSRET CS)
+    
+    let user_data_selector = SegmentSelector::new(9, PrivilegeLevel::Ring3);
+    let user_code_selector = SegmentSelector::new(10, PrivilegeLevel::Ring3);
     
     (gdt, Selectors {
         code_selector: kernel_code_selector,
@@ -163,9 +163,9 @@ pub fn init() {
     
     GDT.0.load();
     unsafe {
-        // Use our new syscall-compliant selectors
-        CS::set_reg(GDT.1.code_selector); // 0x38
-        DS::set_reg(GDT.1.data_selector); // 0x40
+        // Use standard selectors
+        CS::set_reg(GDT.1.code_selector); // 0x8
+        DS::set_reg(GDT.1.data_selector); // 0x10
         ES::set_reg(GDT.1.data_selector);
         SS::set_reg(GDT.1.data_selector);
         FS::set_reg(GDT.1.data_selector);
@@ -174,7 +174,7 @@ pub fn init() {
         load_tss(GDT.1.tss_selector);
     }
     
-    log::info!("[Arch] GDT and TSS initialized");
+    log::info!("[Arch] GDT and TSS initialized (Code=0x8)");
 }
 
 pub fn kernel_cs() -> u16 { GDT.1.code_selector.0 }
@@ -185,5 +185,4 @@ pub fn user_ds() -> u16 { GDT.1.user_data_selector.0 }
 pub unsafe fn set_interrupt_stack(stack_top: u64) {
     let tss = &*TSS as *const TaskStateSegment as *mut TaskStateSegment;
     (*tss).privilege_stack_table[0] = VirtAddr::new(stack_top);
-    log::debug!("[GDT] TSS RSP0 set to 0x{:x}", stack_top);
 }
