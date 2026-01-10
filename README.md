@@ -65,14 +65,14 @@ qemu-system-x86_64.exe -m 512M -bios C:\path\to\OVMF_CODE.fd -drive format=raw,f
 ./run-qemu-x86.sh
 ```
 
-### macOS (Intel only)
+### macOS (Apple Silicon & Intel)
+Works on Apple Silicon via QEMU TCG emulation!
 
 ```bash
 brew install qemu
+# Requires edk2-x86_64-code.fd (available in qemu package or via homebrew)
 ./run-qemu-x86.sh
 ```
-
-> ⚠️ **Note**: Apple Silicon Macs cannot run x86 QEMU with UEFI due to TCG limitations.
 
 ## Project Structure
 
@@ -81,10 +81,10 @@ Aether/
 ├── src/
 │   ├── arch/       # x86_64, aarch64 architecture code
 │   ├── mm/         # Memory management, paging
-│   ├── sched/      # Process scheduler, task management
+│   ├── sched/      # Process sched (Sleep, WaitQueue support)
 │   ├── syscall/    # POSIX syscalls, ELF loader
 │   ├── fs/         # VFS, RamFS, DevFS, ProcFS
-│   └── drivers/    # Keyboard, serial drivers
+│   └── drivers/    # Serial (UART), Keyboard (PS/2)
 ├── init/
 │   ├── init.bin    # Simple init binary
 │   └── busybox.bin # BusyBox 1.35 (musl static)
@@ -96,7 +96,8 @@ Aether/
 - [x] Phase 14: POSIX Syscall Coverage
 - [x] Phase 15: ELF Dynamic Linker (kernel support)
 - [x] Phase 16: Virtual Filesystems (/dev, /proc)
-- [x] Phase 17: BusyBox Shell (current milestone)
+- [x] Phase 17: BusyBox Shell (Interactive w/ Input & Job Control)
+- [ ] Phase 12: ARM64 Platform Features (Device Tree, GIC, UART)
 - [ ] Phase 18: ext4 Filesystem
 - [ ] Phase 19: Real x86 Hardware Boot
 

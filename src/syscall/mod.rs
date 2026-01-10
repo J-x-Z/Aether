@@ -40,14 +40,41 @@ pub fn sys_poll(fds: usize, nfds: usize, timeout: usize) -> isize {
 
     // Checking FDs
     if nfds > 0 {
-        let _slice = unsafe { core::slice::from_raw_parts_mut(fds_ptr, nfds) };
-        // TODO: Actually check file descriptors
-        // For now, assume no events are ready (timeout)
-        // This is enough to let BusyBox continue (it will just loop or timeout)
-        // Ideally we should sleep if timeout > 0
+        let slice = unsafe { core::slice::from_raw_parts_mut(fds_ptr, nfds) };
+        
+        // Simple polling loop with timeout simulation
+        // We iterate a few times to allow interrupts to fire (UART is slow)
+        let loops = if timeout == 0 { 1 } else { 100000 }; 
+        
+        for _ in 0..loops {
+             let mut events_found = 0;
+             for pollfd in slice.iter_mut() {
+                // FD 0 (STDIN) Check
+                if pollfd.fd == 0 {
+                    if crate::drivers::console_input::has_data() || crate::drivers::console::is_data_ready() {
+                        pollfd.revents |= POLLIN;
+                        events_found += 1;
+                    }
+                }
+                // FD 1/2 (STDOUT/STDERR) are always writable
+                if pollfd.fd == 1 || pollfd.fd == 2 {
+                    pollfd.revents |= POLLOUT;
+                    events_found += 1;
+                }
+             }
+             
+             if events_found > 0 {
+                 return events_found; // Return immediately if we found something
+             }
+             
+             // Wait a bit (allow interrupts)
+             if loops > 1 {
+                 unsafe { core::arch::asm!("hlt"); }
+             }
+        }
     }
-
-    // Return 0 (success, 0 events)
+    
+    // Return 0 (timeout)
     0
 }
 
@@ -155,6 +182,9 @@ pub fn dispatch(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
         numbers::SYS_MMAP => sys_mmap(arg0, arg1, arg2),
         numbers::SYS_MUNMAP => sys_munmap(arg0, arg1),
         numbers::SYS_BRK => sys_brk(arg0),
+
+        // Time
+        numbers::SYS_NANOSLEEP => sys_nanosleep(arg0, arg1),
 
         
         // File descriptors
@@ -276,6 +306,37 @@ fn sys_open(filename: usize, flags: usize, _mode: usize) -> isize {
 }
 
 fn sys_read(fd: usize, buf_ptr: usize, count: usize) -> isize {
+    // Hardcoded STDIN for now (Keyboard)
+    if fd == 0 {
+        if count == 0 { return 0; }
+        
+        let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, count) };
+        let mut nread = 0;
+        
+        // Try to read at least one char (from buffer OR hardware)
+        while nread < count {
+            if let Some(c) = crate::drivers::console_input::pop_char() {
+                buf[nread] = c;
+                nread += 1;
+            } else if let Some(c) = crate::drivers::console::read_serial() {
+                // Fallback: Poll hardware directly
+                buf[nread] = c;
+                nread += 1;
+            } else {
+                break;
+            }
+        }
+        
+        if nread > 0 {
+            return nread as isize;
+        } else {
+            // No data available
+            // If strict blocking is needed, we should yield.
+            // For now, return EAGAIN to let busybox poll.
+            return -11; // EAGAIN
+        }
+    }
+
     let current_lock = CURRENT_TASK.lock();
     if let Some(task_arc) = current_lock.as_ref() {
         let mut task = task_arc.lock();
@@ -458,6 +519,24 @@ fn sys_lseek(fd: usize, offset: i64, whence: usize) -> isize {
         }
     }
     -9 // EBADF
+}
+
+fn sys_nanosleep(req: usize, _rem: usize) -> isize {
+    // struct timespec { time_t tv_sec; long tv_nsec; };
+    // We assume x86_64, so tv_sec is i64 (8 bytes), tv_nsec is i64 (8 bytes)
+    let ptr = req as *const u64; // [sec, nsec]
+    if ptr.is_null() { return -14; } // EFAULT
+    
+    let sec = unsafe { *ptr };
+    let nsec = unsafe { *ptr.add(1) };
+    
+    // Convert to ms
+    let ms = (sec * 1000) + (nsec / 1_000_000);
+    
+    // Call scheduler sleep
+    log::trace!("[syscall::nanosleep] Sleeping for {} ms", ms);
+    crate::sched::sleep(ms);
+    0
 }
 
 fn sys_ioctl(_fd: usize, cmd: usize, _arg: usize) -> isize {
@@ -743,16 +822,7 @@ fn sys_gettimeofday(tv: usize, _tz: usize) -> isize {
     0
 }
 
-fn sys_nanosleep(req: usize, _rem: usize) -> isize {
-    if req != 0 {
-        // Read timespec but just spin for now
-        // In real OS we'd schedule another task
-        for _ in 0..10000 {
-            core::hint::spin_loop();
-        }
-    }
-    0
-}
+
 
 fn sys_clock_gettime(clock_id: usize, tp: usize) -> isize {
     if tp != 0 {

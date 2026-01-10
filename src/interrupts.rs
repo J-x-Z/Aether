@@ -16,6 +16,7 @@ pub static PICS: Mutex<ChainedPics> =
 pub enum InterruptIndex {
     Timer = PIC_1_OFFSET,
     Keyboard = PIC_1_OFFSET + 1,
+    Serial1 = PIC_1_OFFSET + 4,
 }
 
 impl InterruptIndex {
@@ -29,6 +30,10 @@ impl InterruptIndex {
 }
 
 use spin::Once;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// System Ticks (Timer Interrupts)
+pub static TICKS: AtomicU64 = AtomicU64::new(0);
 
 static IDT: Once<InterruptDescriptorTable> = Once::new();
 
@@ -55,7 +60,9 @@ fn create_idt() -> InterruptDescriptorTable {
         .set_handler_fn(timer_interrupt_handler);
     idt[InterruptIndex::Keyboard.as_usize()]
         .set_handler_fn(keyboard_interrupt_handler);
-        
+    idt[InterruptIndex::Serial1.as_usize()]
+        .set_handler_fn(serial_interrupt_handler);
+
     idt
 }
 
@@ -89,18 +96,23 @@ pub fn init_idt() {
     info!("[Aether::Interrupts] Initializing IDT...");
     
     // CRITICAL FIX: Force CS to 0x08 (Index 1, Ring 0) before loading IDT.
-    // The x86_64 crate's set_handler_fn() captures the CURRENT CS.
-    // We do this immediately before creating the IDT table entries.
     unsafe { 
         CS::set_reg(SegmentSelector(0x08)); 
     }
     
-    // Now create and initialize the IDT. This will run create_idt() 
-    // which calls set_handler_fn(), capturing the CS we just set (0x08).
     let idt = IDT.call_once(create_idt);
     idt.load();
     
-    unsafe { PICS.lock().initialize() };
+    unsafe { 
+        let mut pics = PICS.lock();
+        pics.initialize();
+        
+        // Manual Unmasking of IRQ 1 (Keyboard) and IRQ 4 (Serial)
+        let mut master_data = x86_64::instructions::port::Port::<u8>::new(0x21);
+        let mask = master_data.read();
+        let new_mask = mask & !( (1 << 1) | (1 << 4) );
+        master_data.write(new_mask);
+    }
     init_pit();
     
     // NOW it's safe: Our GDT is loaded, our IDT is loaded with correct CS, PICs are configured.
@@ -172,11 +184,15 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
     
     // 2. Process Scancode
     if let Some(key) = crate::keyboard::process_scancode(scancode) {
-        // 3. Inject into Guests (Multi-Cast)
+        // PUSH TO GLOBAL BUFFER
+        crate::drivers::console_input::push_char(key);
+        
+        // OPTIONAL: Local Echo for Debugging (Print to screen immediately)
+        // print!("{}", key); 
+
+        // 3. Inject into Guests (Multi-Cast) - Optional for now
         if let Some(mut sched_lock) = crate::globals::SCHEDULER.try_lock() {
             if let Some(sched) = (*sched_lock).as_mut() {
-                // Broadcast input to all processes!
-                // Ideally we only send to "Focused" process, but for now we broadcast.
                 for process in &sched.processes {
                     process.backend.inject_key(key);
                 }
@@ -190,9 +206,30 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
     }
 }
 
+extern "x86-interrupt" fn serial_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    // Read from Serial Port
+    if let Some(byte) = crate::drivers::console::read_serial() {
+         // Push to global buffer
+         crate::drivers::console_input::push_char(byte as char);
+         // Local echo optional
+         // print!("{}", byte as char);
+    }
+    
+    // Notify PICS
+    unsafe {
+        PICS.lock().notify_end_of_interrupt(InterruptIndex::Serial1.as_u8());
+    }
+}
+
 extern "x86-interrupt" fn timer_interrupt_handler(
     _stack_frame: InterruptStackFrame) 
 {
+    // Increment Tick Counter
+    TICKS.fetch_add(1, Ordering::Relaxed);
+    
+    // Check for Sleeping Tasks
+    crate::sched::check_timers();
+
     // Blit Shadow Buffer to Screen
     crate::video::blit();
 
