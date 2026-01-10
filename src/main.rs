@@ -101,11 +101,9 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     #[cfg(target_arch = "x86_64")]
     if ENABLE_GOP {
         screen_print!(system_table, "[BOOT] About to init GOP...");
-        init_video(&system_table);
         screen_print!(system_table, "[BOOT] GOP init returned");
         early_serial_print(b"[BOOT] Video OK\r\n");
-        // STALL 2s to see if GOP crashed
-        system_table.boot_services().stall(2_000_000); 
+        // Removed GOP stall as it passed
     } else {
         screen_print!(system_table, "[BOOT] GOP disabled for debugging");
     }
@@ -113,17 +111,28 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // 2. Initialize Architecture
     early_serial_print(b"[BOOT] Initializing Arch...\r\n");
     log::info!("[Kernel] Initializing Architecture...");
-    arch::init();
-    early_serial_print(b"[BOOT] Arch OK, loading IDT...\r\n");
-    // STALL 2s
-    system_table.boot_services().stall(2_000_000);
     
+    // Manual arch::init expansion for granular debugging
+    unsafe { core::arch::asm!("cli", options(nomem, nostack)); }
+    screen_print!(system_table, "[Arch] Interrupts disabled (CLI)");
+    system_table.boot_services().stall(1_000_000);
+
+    arch::gdt::init();
+    screen_print!(system_table, "[Arch] GDT loaded");
+    system_table.boot_services().stall(1_000_000);
+
+    arch::syscall::init();
+    screen_print!(system_table, "[Arch] Syscall MSRs set");
+    system_table.boot_services().stall(1_000_000);
+    
+    early_serial_print(b"[BOOT] Arch OK, loading IDT...\r\n");
+
     #[cfg(target_arch = "x86_64")]
     {
         interrupts::init_idt();
         log::info!("[Kernel] IDT initialized");
     }
-    // STALL 2s
+    // Keep IDT stall
     system_table.boot_services().stall(2_000_000);
     
     // 3. Initialize Memory Management
