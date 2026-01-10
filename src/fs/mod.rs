@@ -25,7 +25,7 @@ static MOUNTS: RwLock<Vec<MountPoint>> = RwLock::new(Vec::new());
 pub static ROOT: RwLock<Option<Arc<dyn Inode>>> = RwLock::new(None);
 
 /// Initialize filesystem layer
-pub fn init() {
+pub fn init(_phys_offset: u64) {
     log::info!("[VFS] Initializing Virtual Filesystem...");
     
     // Create root RamFS
