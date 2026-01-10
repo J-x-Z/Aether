@@ -129,15 +129,15 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // Manual arch::init expansion for granular debugging
     unsafe { core::arch::asm!("cli", options(nomem, nostack)); }
     screen_print!(system_table, "[Arch] Interrupts disabled (CLI)");
-    system_table.boot_services().stall(1_000_000);
+    // Removed stall here as it might hang on some firmware with CLI
 
+    screen_print!(system_table, "[Arch] Loading GDT...");
     arch::gdt::init();
-    screen_print!(system_table, "[Arch] GDT loaded");
-    system_table.boot_services().stall(1_000_000);
+    screen_print!(system_table, "[Arch] GDT loaded - RELOADING SEGMENTS DONE");
 
+    screen_print!(system_table, "[Arch] Initializing Syscall MSRs...");
     arch::syscall::init();
     screen_print!(system_table, "[Arch] Syscall MSRs set");
-    system_table.boot_services().stall(1_000_000);
     
     early_serial_print(b"[BOOT] Arch OK, loading IDT...\r\n");
 
@@ -146,8 +146,8 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         interrupts::init_idt();
         log::info!("[Kernel] IDT initialized");
     }
-    // Keep IDT stall
-    system_table.boot_services().stall(2_000_000);
+    
+    // 3. Initialize Memory Management
     
     // 3. Initialize Memory Management
     early_serial_print(b"[BOOT] Initializing MM...\r\n");
