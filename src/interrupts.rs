@@ -154,9 +154,14 @@ pub fn init_idt() {
     info!("[Aether::Interrupts] PIT initialized");
     
     // NOW it's safe: Our GDT is loaded, our IDT is loaded with correct CS, PICs are configured.
-    // Re-enable interrupts.
+    // BUT we should NOT enable interrupts yet. wait until MM and SCHED are ready.
+    // unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+    info!("[Aether::Interrupts] IDT ready, interrupts disabled (waiting for Kernel Init).");
+}
+
+pub fn enable() {
     unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
-    info!("[Aether::Interrupts] IDT ready, interrupts enabled.");
+    info!("[Aether::Interrupts] Interrupts ENABLED.");
 }
 
 extern "x86-interrupt" fn breakpoint_handler(

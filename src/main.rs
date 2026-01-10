@@ -172,6 +172,10 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // 6. Initialize Drivers
     log::info!("[Kernel] Initializing Drivers...");
     drivers::init();
+
+    // 7. Enable Interrupts (NOW it's safe)
+    #[cfg(target_arch = "x86_64")]
+    interrupts::enable();
     
     // For testing: set to true to use simple init.bin instead of BusyBox
     const USE_SIMPLE_INIT: bool = false;
