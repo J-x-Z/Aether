@@ -13,14 +13,13 @@ pub fn init(st: &SystemTable<Boot>) -> (u64, ()) {
     {
         use uefi::table::boot::MemoryType;
         
-        log::info!("[MM] Getting UEFI Memory Map...");
-        
-        // 1. Get Memory Map Size
-        let map_size = st.boot_services().memory_map_size().map_size;
-        // Allocate with padding for fragmentation/alignment
-        let buffer_size = map_size + 8 * core::mem::size_of::<uefi::table::boot::MemoryDescriptor>();
-        
-        let mut buffer = alloc::vec![0u8; buffer_size];
+        // CRITICAL: We CANNOT use alloc::vec! here because heap is not initialized yet!
+        // Use a static stack buffer instead.
+        // Max size: ~8KB should cover most UEFI memory maps (hundreds of descriptors).
+        // Use a static stack buffer instead.
+        // Max size: ~8KB should cover most UEFI memory maps (hundreds of descriptors).
+        const MAP_BUF_SIZE: usize = 8192;
+        let mut buffer = [0u8; MAP_BUF_SIZE];
         
         // 2. Get Memory Map
         // We need to collect the best region, then drop the iterator/map to satisfy borrow checker if needed,
