@@ -28,24 +28,62 @@ mod keyboard;
 use uefi::prelude::*;
 use uefi::proto::console::gop::GraphicsOutput;
 
+/// Ultra-early serial output for bare-metal debugging (before any init)
+#[cfg(target_arch = "x86_64")]
+#[inline(never)]
+fn early_serial_print(s: &[u8]) {
+    const COM1: u16 = 0x3F8;
+    unsafe {
+        use x86_64::instructions::port::Port;
+        let mut data: Port<u8> = Port::new(COM1);
+        let mut status: Port<u8> = Port::new(COM1 + 5);
+        for &byte in s {
+            // Wait for transmit buffer empty
+            while (status.read() & 0x20) == 0 {}
+            data.write(byte);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn early_serial_print(_s: &[u8]) {}
+
 #[entry]
 fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
+    // === EARLY DEBUG: Before ANYTHING ===
+    early_serial_print(b"\r\n[BOOT] Aether EFI entry point reached\r\n");
+    
     uefi_services::init(&mut system_table).unwrap();
+    early_serial_print(b"[BOOT] UEFI services initialized\r\n");
+    
     system_table.stdout().reset(false).unwrap();
+    early_serial_print(b"[BOOT] UEFI stdout reset\r\n");
     
     log::info!("Aether Kernel 2.0 (Hybrid/POSIX) booting...");
+    early_serial_print(b"[BOOT] Log initialized\r\n");
     
     // 1. Initialize Video (GOP) - x86 only for now
     #[cfg(target_arch = "x86_64")]
-    init_video(&system_table);
+    {
+        early_serial_print(b"[BOOT] Initializing Video...\r\n");
+        init_video(&system_table);
+        early_serial_print(b"[BOOT] Video OK\r\n");
+    }
     
     // 2. Initialize Architecture
+    early_serial_print(b"[BOOT] Initializing Arch...\r\n");
     log::info!("[Kernel] Initializing Architecture...");
     arch::init();
+    early_serial_print(b"[BOOT] Arch OK, loading IDT...\r\n");
+    
     #[cfg(target_arch = "x86_64")]
-    interrupts::init_idt(); // Use legacy interrupt handler for now as arch::idt is stub
+    {
+        interrupts::init_idt();
+        early_serial_print(b"[BOOT] IDT OK\r\n");
+    }
     
     // 3. Initialize Memory Management
+    early_serial_print(b"[BOOT] Initializing MM...\r\n");
     log::info!("[Kernel] Initializing Memory Management...");
     mm::init();
     
