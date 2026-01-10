@@ -37,7 +37,15 @@ static GDT: Lazy<(GlobalDescriptorTable, Selectors)> = Lazy::new(|| {
     let user_data_selector = gdt.add_entry(Descriptor::user_data_segment());
     let user_code_selector = gdt.add_entry(Descriptor::user_code_segment());
     
-    // TSS
+    // PADDING: Some UEFI firmware uses selectors 0x30 (Data) and 0x38 (Code).
+    // Our TSS used to occupy 0x28-0x37. If an NMI/Exception happens
+    // while SS=0x30 (before we reload it), specific layout collision crashes the CPU.
+    // We add duplicates here to keep 0x30 (Data) and 0x38 (Code) valid.
+    let _ = gdt.add_entry(Descriptor::kernel_data_segment()); // 0x28
+    let _ = gdt.add_entry(Descriptor::kernel_data_segment()); // 0x30
+    let _ = gdt.add_entry(Descriptor::kernel_code_segment()); // 0x38
+    
+    // TSS (Now at 0x40)
     let tss_selector = gdt.add_entry(Descriptor::tss_segment(&TSS));
     
     (gdt, Selectors {
