@@ -78,10 +78,15 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     screen_print!(system_table, "[BOOT] Log initialized");
     
     // Initialize UEFI Input (for Hyper-V keyboard)
-    unsafe {
-        drivers::uefi_input::init_protocol(system_table.stdin() as *mut _);
+    const ENABLE_UEFI_INPUT: bool = false;
+    if ENABLE_UEFI_INPUT {
+        unsafe {
+            drivers::uefi_input::init_protocol(system_table.stdin() as *mut _);
+        }
+        screen_print!(system_table, "[BOOT] UEFI Input driver registered");
+    } else {
+        screen_print!(system_table, "[BOOT] UEFI Input disabled (debugging crash)");
     }
-    screen_print!(system_table, "[BOOT] UEFI Input driver registered");
 
     // 1. Initialize Video (GOP) - x86 only for now
     // Re-enabled with detailed step-by-step debugging
