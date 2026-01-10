@@ -9,6 +9,72 @@ use crate::fs;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct PollFd {
+    pub fd: i32,
+    pub events: i16,
+    pub revents: i16,
+}
+
+pub const POLLIN: i16 = 0x001;
+pub const POLLPRI: i16 = 0x002;
+pub const POLLOUT: i16 = 0x004;
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct IoVec {
+    pub base: u64,
+    pub len: u64,
+}
+
+pub fn sys_poll(fds: usize, nfds: usize, timeout: usize) -> isize {
+    let fds_ptr = fds as *mut PollFd;
+    // Timeout is in milliseconds
+    let _timeout_ms = timeout as i32;
+
+    // Safety check for user pointer
+    if nfds > 0 && fds_ptr.is_null() {
+        return -14; // EFAULT
+    }
+
+    // Checking FDs
+    if nfds > 0 {
+        let _slice = unsafe { core::slice::from_raw_parts_mut(fds_ptr, nfds) };
+        // TODO: Actually check file descriptors
+        // For now, assume no events are ready (timeout)
+        // This is enough to let BusyBox continue (it will just loop or timeout)
+        // Ideally we should sleep if timeout > 0
+    }
+
+    // Return 0 (success, 0 events)
+    0
+}
+
+pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
+    // Validate iovcnt
+    if iovcnt > 1024 { return -22; } // EINVAL
+
+    let iov_ptr = iov_ptr as *const IoVec;
+    // Safety check
+    if iov_ptr.is_null() { return -14; } // EFAULT
+    
+    let iovs = unsafe { core::slice::from_raw_parts(iov_ptr, iovcnt) };
+    
+    let mut total_written = 0;
+    for iov in iovs {
+        let res = sys_write(fd, iov.base as usize, iov.len as usize);
+        if res < 0 {
+            if total_written > 0 { return total_written; }
+            return res;
+        }
+        total_written += res;
+    }
+    total_written
+}
+
+
+
 /// Syscall numbers (Linux x86_64 ABI compatible)
 pub mod numbers {
     // Core I/O
@@ -18,10 +84,13 @@ pub mod numbers {
     pub const SYS_CLOSE: usize = 3;
     pub const SYS_STAT: usize = 4;
     pub const SYS_FSTAT: usize = 5;
+    pub const SYS_LSTAT: usize = 6;
+    pub const SYS_POLL: usize = 7;
     pub const SYS_LSEEK: usize = 8;
     pub const SYS_MMAP: usize = 9;
     pub const SYS_BRK: usize = 12;
     pub const SYS_IOCTL: usize = 16;
+    pub const SYS_WRITEV: usize = 20;
     
     // File descriptors
     pub const SYS_DUP: usize = 32;
@@ -75,6 +144,9 @@ pub fn dispatch(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
         // Core I/O
         numbers::SYS_READ => sys_read(arg0, arg1, arg2),
         numbers::SYS_WRITE => sys_write(arg0, arg1, arg2),
+        numbers::SYS_POLL => sys_poll(arg0, arg1, arg2),
+        numbers::SYS_IOCTL => sys_ioctl(arg0, arg1, arg2),
+        numbers::SYS_WRITEV => sys_writev(arg0, arg1, arg2),
         numbers::SYS_OPEN => sys_open(arg0, arg1, arg2),
         numbers::SYS_CLOSE => sys_close(arg0),
         numbers::SYS_STAT => sys_stat(arg0, arg1),
@@ -83,7 +155,7 @@ pub fn dispatch(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
         numbers::SYS_MMAP => sys_mmap(arg0, arg1, arg2),
         numbers::SYS_MUNMAP => sys_munmap(arg0, arg1),
         numbers::SYS_BRK => sys_brk(arg0),
-        numbers::SYS_IOCTL => sys_ioctl(arg0, arg1, arg2),
+
         
         // File descriptors
         numbers::SYS_DUP => sys_dup(arg0),

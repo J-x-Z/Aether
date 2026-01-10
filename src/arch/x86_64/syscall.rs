@@ -72,51 +72,101 @@ unsafe fn wrmsr(msr: u32, value: u64) {
 
 /// Syscall entry point (naked function)
 /// At entry: RCX=user RIP, R11=user RFLAGS, RSP=user stack
-/// Syscall args: RAX=nr, RDI=a0, RSI=a1, RDX=a2, R10=a3, R8=a4, R9=a5
+/// Syscall args (Linux): RAX=nr, RDI=a0, RSI=a1, RDX=a2, R10=a3, R8=a4, R9=a5
 #[unsafe(naked)]
 #[no_mangle]
 pub unsafe extern "C" fn syscall_entry() {
     core::arch::naked_asm!(
-        // ===== ULTRA-SIMPLE APPROACH =====
-        // Save syscall args to callee-saved registers IMMEDIATELY
-        // Syscall ABI (Linux): RAX=nr, RDI=a0, RSI=a1, RDX=a2, R10=a3, R8=a4, R9=a5
+        // =================================================================================
+        // FULL CONTEXT SAVE
+        // Linux Syscall ABI: Kernel must preserve ALL regs except RAX, RCX, R11.
+        // We must switch to kernel stack and save everything.
+        // =================================================================================
         
-        // Step 1: Save syscall args
-        "mov r12, rax",                     // r12 = syscall number
-        "mov r13, rdi",                     // r13 = a0  
-        "mov r14, rsi",                     // r14 = a1
-        "mov r15, rdx",                     // r15 = a2
+        // 1. Save R15 to User Stack (so we can use R15 as scratch)
+        // We push R15 to user stack. Then we save RSP (which points to saved R15).
+        "push r15", 
         
-        // Step 2: Save user RSP to rbx (callee-saved)
-        "mov rbx, rsp",
+        // 2. Save User RSP (now pointing to saved R15) to R15 register
+        "mov r15, rsp",
         
-        // Step 3: Switch to kernel stack
+        // 3. Switch to Kernel Stack
+        // Use consistent LEA + MOV approach to safely load from static
         "lea rsp, [{kernel_rsp}]",
         "mov rsp, [rsp]",
         
-        // Step 4: Push sysret state (on kernel stack)
-        "push rbx",                         // User RSP
-        "push rcx",                         // User RIP (syscall puts it here)
-        "push r11",                         // User RFLAGS (syscall puts it here)
+        // 4. Save User RSP (the value in R15)
+        "push r15",
         
-        // Step 5: Set up WINDOWS x64 calling convention for syscall_dispatch(nr, a0, a1, a2)
-        // UEFI target uses Windows ABI: RCX, RDX, R8, R9 (NOT Linux: RDI, RSI, RDX, RCX)
-        "mov rcx, r12",                     // RCX = syscall number
-        "mov rdx, r13",                     // RDX = a0
-        "mov r8, r14",                      // R8 = a1
-        "mov r9, r15",                      // R9 = a2
+        // 5. Save everything else
+        "push r14",
+        "push r13",
+        "push r12",
+        "push rbp",
+        "push rbx",
+        "push r11", // User RFLAGS
+        "push r10",
+        "push r9",
+        "push r8", 
+        "push rcx", // User RIP
+        "push rdx",
+        "push rsi",
+        "push rdi",
+        "push rax", // Syscall NR
         
-        // Step 6: Call dispatcher
+        // Stack Frame is setup.
+        
+        // 6. Prepare Arguments for syscall_dispatch(nr, a0, a1, a2)
+        // Windows ABI: RCX, RDX, R8, R9
+        // Sources (from stack):
+        //   NR (RAX) -> RCX
+        //   a0 (RDI) -> RDX
+        //   a1 (RSI) -> R8
+        //   a2 (RDX) -> R9
+        // Stack layout (top to bottom):
+        // [RAX, RDI, RSI, RDX, RCX, R8, R9, R10, R11, RBX, RBP, R12, R13, R14, UserRSP]
+        // Offsets from RSP:
+        // RSP+0  = RAX
+        // RSP+8  = RDI
+        // RSP+16 = RSI
+        // RSP+24 = RDX
+        
+        "mov rcx, [rsp]",      // NR (RAX)
+        "mov rdx, [rsp+8]",    // a0 (RDI)
+        "mov r8, [rsp+16]",    // a1 (RSI)
+        "mov r9, [rsp+24]",    // a2 (RDX)
+        
+        // 7. Call Dispatcher
         "call syscall_dispatch",
         
-        // RAX = return value
+        // 8. Handle Return Value (RAX)
+        // Overwrite saved RAX on stack with return value
+        "mov [rsp], rax",
         
-        // Step 7: Restore sysret state
-        "pop r11",                          // User RFLAGS
-        "pop rcx",                          // User RIP
-        "pop rsp",                          // User RSP
+        // 9. Restore Registers
+        "pop rax", // Restore RAX (now holding return value)
+        "pop rdi",
+        "pop rsi",
+        "pop rdx",
+        "pop rcx", // User RIP
+        "pop r8",
+        "pop r9",
+        "pop r10",
+        "pop r11", // User RFLAGS
+        "pop rbx",
+        "pop rbp",
+        "pop r12",
+        "pop r13",
+        "pop r14",
         
-        // Step 8: Return to userspace
+        // 10. Restore User RSP
+        "pop r15",      // This is (UserVal - 8)
+        "mov rsp, r15", // Switch back to User Stack
+        
+        // 11. Restore R15 (it was pushed to user stack at step 1)
+        "pop r15",      // RSP goes back to OriginalUserVal
+        
+        // 12. Return
         "sysretq",
         
         kernel_rsp = sym KERNEL_RSP0,
