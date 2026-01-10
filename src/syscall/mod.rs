@@ -160,17 +160,6 @@ pub mod numbers {
 
 /// Main syscall dispatcher
 pub fn dispatch(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
-    // Debug: Log syscall number via serial
-    // Only log important syscalls to avoid spam
-    if nr == numbers::SYS_WRITE || nr == numbers::SYS_READ || nr == numbers::SYS_EXIT {
-        // Simple debug: write 'S' + syscall number digit to serial
-        crate::drivers::console::write_serial(b'[');
-        crate::drivers::console::write_serial(b'S');
-        crate::drivers::console::write_serial(b'0' + (nr / 10) as u8);
-        crate::drivers::console::write_serial(b'0' + (nr % 10) as u8);
-        crate::drivers::console::write_serial(b']');
-    }
-    
     // Sanity check: Linux x86_64 has ~450 syscalls, anything much larger is suspicious
     if nr > 500 {
         return -38; // ENOSYS

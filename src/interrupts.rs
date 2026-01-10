@@ -125,31 +125,18 @@ use x86_64::instructions::segmentation::{CS, Segment};
 use x86_64::structures::gdt::SegmentSelector;
 
 pub fn init_idt() {
-    // SERIAL DEBUG
-    crate::drivers::console::write_serial(b'[');
-    crate::drivers::console::write_serial(b'I');
-    crate::drivers::console::write_serial(b'D');
-    crate::drivers::console::write_serial(b'T');
-    crate::drivers::console::write_serial(b']');
-    crate::drivers::console::write_serial(b'\n');
-
     info!("[Aether::Interrupts] Initializing IDT...");
-    
-    // Removed redundant CS reload (already done in arch::init)
     
     let idt = IDT.call_once(create_idt);
     idt.load();
     info!("[Aether::Interrupts] IDT loaded");
-    
-    crate::drivers::console::write_serial(b'P'); // P for PIC
-    crate::drivers::console::write_serial(b'\n');
 
     unsafe { 
         let mut pics = PICS.lock();
         pics.initialize();
         info!("[Aether::Interrupts] PICS initialized");
         
-        // Manual Unmasking of IRQ 0 (Timer), IRQ 1 (Keyboard) and IRQ 4 (Serial)
+        // Unmask IRQ 0 (Timer), IRQ 1 (Keyboard) and IRQ 4 (Serial)
         let mut master_data = x86_64::instructions::port::Port::<u8>::new(0x21);
         let mask = master_data.read();
         let new_mask = mask & !( (1 << 0) | (1 << 1) | (1 << 4) );
@@ -158,20 +145,7 @@ pub fn init_idt() {
     info!("[Aether::Interrupts] IRQs unmasked");
 
     init_pit();
-    crate::drivers::console::write_serial(b'T'); // T for Timer/PIT
-    crate::drivers::console::write_serial(b'\n');
-    
-    // info!("[Aether::Interrupts] PIT initialized");
-    
-    // NOW it's safe: Our GDT is loaded, our IDT is loaded with correct CS, PICs are configured.
-    // BUT we should NOT enable interrupts yet. wait until MM and SCHED are ready.
-    // unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
-    // info!("[Aether::Interrupts] IDT ready, interrupts disabled (waiting for Kernel Init).");
-    crate::drivers::console::write_serial(b'D'); // D for Done
-    crate::drivers::console::write_serial(b'O');
-    crate::drivers::console::write_serial(b'N');
-    crate::drivers::console::write_serial(b'E');
-    crate::drivers::console::write_serial(b'\n');
+    info!("[Aether::Interrupts] PIT initialized");
 }
 
 pub fn enable() {

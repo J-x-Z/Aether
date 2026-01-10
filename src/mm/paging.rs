@@ -327,8 +327,6 @@ mod x86_64_paging {
         if *pt.add(pt_idx) & 1 == 0 {
             let frame = alloc_user_page(); // Allocate DATA page
             *pt.add(pt_idx) = frame | 0x7;
-            // SERIAL DEBUG: Mapped
-            crate::drivers::console::write_serial(b'M');
         } else {
             *pt.add(pt_idx) |= 0x6;
         }
