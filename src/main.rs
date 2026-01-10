@@ -78,8 +78,8 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     screen_print!(system_table, "[BOOT] Log initialized");
     
     // 1. Initialize Video (GOP) - x86 only for now
-    // TEMPORARILY DISABLED for real hardware debugging
-    const ENABLE_GOP: bool = false;
+    // Re-enabled with detailed step-by-step debugging
+    const ENABLE_GOP: bool = true;
     #[cfg(target_arch = "x86_64")]
     if ENABLE_GOP {
         screen_print!(system_table, "[BOOT] About to init GOP...");
@@ -200,38 +200,62 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
 
 #[cfg(target_arch = "x86_64")]
 fn init_video(st: &SystemTable<Boot>) {
+    use core::fmt::Write as _;
+    
+    // Helper for screen output during GOP init
+    let print = |msg: &str| {
+        let _ = core::fmt::Write::write_str(st.stdout(), msg);
+        let _ = core::fmt::Write::write_str(st.stdout(), "\r\n");
+    };
+    
+    print("[GOP] Step 1: Getting boot services...");
     let bt = st.boot_services();
     
-    // Try to get GOP handle
+    print("[GOP] Step 2: Getting GOP handle...");
     let gop_handle = match bt.get_handle_for_protocol::<GraphicsOutput>() {
-        Ok(h) => h,
+        Ok(h) => {
+            print("[GOP] Step 2: OK - got handle");
+            h
+        },
         Err(e) => {
-            log::warn!("[Video] GOP not available: {:?} - continuing without graphics", e);
+            log::warn!("[Video] GOP not available: {:?}", e);
+            print("[GOP] Step 2: FAILED - no GOP handle");
             return;
         }
     };
     
-    // Try to open GOP protocol
+    print("[GOP] Step 3: Opening GOP protocol...");
     let mut gop = match bt.open_protocol_exclusive::<GraphicsOutput>(gop_handle) {
-        Ok(g) => g,
+        Ok(g) => {
+            print("[GOP] Step 3: OK - protocol opened");
+            g
+        },
         Err(e) => {
-            log::warn!("[Video] Failed to open GOP: {:?} - continuing without graphics", e);
+            log::warn!("[Video] Failed to open GOP: {:?}", e);
+            print("[GOP] Step 3: FAILED - cannot open protocol");
             return;
         }
     };
     
-    // Get mode info
+    print("[GOP] Step 4: Getting mode info...");
     let mode_info = gop.current_mode_info();
     let (width, height) = mode_info.resolution();
     let stride = mode_info.stride();
+    print("[GOP] Step 4: OK - got mode info");
     
-    // Get framebuffer - this might panic on some systems
+    print("[GOP] Step 5: Getting framebuffer...");
     let mut fb = gop.frame_buffer();
+    print("[GOP] Step 5: OK - got framebuffer");
+    
+    print("[GOP] Step 6: Getting framebuffer pointer...");
     let fb_ptr = fb.as_mut_ptr();
     let size = fb.size();
+    print("[GOP] Step 6: OK - got pointer");
     
+    print("[GOP] Step 7: Initializing video subsystem...");
     crate::video::init(fb_ptr, size, width, height, stride);
     log::info!("[Video] Initialized {}x{} (stride: {})", width, height, stride);
+    print("[GOP] COMPLETE - video initialized");
 }
 
 #[cfg(target_arch = "x86_64")]
