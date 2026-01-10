@@ -58,11 +58,16 @@ impl CustomGdt {
         
         // Manual TSS Descriptor construction (System Segment)
         // System descriptors are 16 bytes in Long Mode.
-        let low = 0x0000000000890000  // Present, Type=0x9 (TSS Available), System
-                | ((ptr & 0xFFFFFF) << 16)
-                | ((ptr & 0xFF000000) << 32)
-                | (limit & 0xFFFF)
-                | ((limit & 0xF0000) << 32);
+        // Base[0-23] @ 16-39
+        // Access Byte (P, DPL, Type) @ 40-47
+        // Limit[16-19] + Flags @ 48-55
+        // Base[24-31] @ 56-63
+        
+        let low = ((ptr & 0xFFFFFF) << 16)              // Base 0-23
+                | ((ptr & 0xFF000000) << 32)            // Base 24-31
+                | (limit & 0xFFFF)                      // Limit 0-15
+                | ((limit & 0xF0000) << 32)             // Limit 16-19
+                | (0x89 << 40);                         // Type=0x9, S=0, P=1, DPL=0
                 
         let high = ptr >> 32;
 
