@@ -172,10 +172,15 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // 6. Initialize Drivers
     log::info!("[Kernel] Initializing Drivers...");
     drivers::init();
+    system_table.boot_services().stall(5_000_000); // STALL
 
     // 7. Enable Interrupts (NOW it's safe)
     #[cfg(target_arch = "x86_64")]
-    interrupts::enable();
+    {
+        interrupts::enable();
+        log::info!("[Kernel] Interrupts ENABLED");
+    }
+    system_table.boot_services().stall(5_000_000); // STALL
     
     // For testing: set to true to use simple init.bin instead of BusyBox
     const USE_SIMPLE_INIT: bool = false;
@@ -193,6 +198,8 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         let len = inode.read_at(0, &mut buffer);
         log::info!("[Kernel] Read {}: {} bytes", init_path, len);
         
+        system_table.boot_services().stall(2_000_000); // STALL
+
         if len > 64 {
             use crate::syscall::elf::{load_elf, setup_user_stack, AuxvEntry, AT_PAGESZ};
             
@@ -236,6 +243,9 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                     // Prevent deallocation of stack
                     core::mem::forget(kernel_stack);
 
+                    log::info!("[Kernel] STALL before User Mode...");
+                    system_table.boot_services().stall(10_000_000); // LONG STALL
+
                     // Jump to Ring 3
                     unsafe {
                         arch::enter_usermode(loaded.entry_point, user_sp);
@@ -251,6 +261,7 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     }
 
     log::error!("[Kernel] Init failed or returned!");
+    system_table.boot_services().stall(10_000_000); // STALL
     
     // Halt Loop
     loop {
