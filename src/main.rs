@@ -50,23 +50,39 @@ fn early_serial_print(_s: &[u8]) {}
 
 #[entry]
 fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
-    // === EARLY DEBUG: Before ANYTHING ===
-    early_serial_print(b"\r\n[BOOT] Aether EFI entry point reached\r\n");
+    // === EARLY DEBUG: Use UEFI text output to show on screen ===
+    // This works before we switch to GOP graphics mode
     
+    // Initialize UEFI services first
     uefi_services::init(&mut system_table).unwrap();
-    early_serial_print(b"[BOOT] UEFI services initialized\r\n");
-    
     system_table.stdout().reset(false).unwrap();
-    early_serial_print(b"[BOOT] UEFI stdout reset\r\n");
+    
+    // Helper macro for screen output
+    macro_rules! screen_print {
+        ($st:expr, $msg:expr) => {
+            {
+                use core::fmt::Write as _;
+                let _ = core::fmt::Write::write_str($st.stdout(), $msg);
+                let _ = core::fmt::Write::write_str($st.stdout(), "\r\n");
+            }
+            // Also send to serial for QEMU
+            early_serial_print($msg.as_bytes());
+            early_serial_print(b"\r\n");
+        };
+    }
+    
+    screen_print!(system_table, "[BOOT] Aether EFI entry point reached");
+    screen_print!(system_table, "[BOOT] UEFI services initialized");
     
     log::info!("Aether Kernel 2.0 (Hybrid/POSIX) booting...");
-    early_serial_print(b"[BOOT] Log initialized\r\n");
+    screen_print!(system_table, "[BOOT] Log initialized");
     
     // 1. Initialize Video (GOP) - x86 only for now
     #[cfg(target_arch = "x86_64")]
     {
-        early_serial_print(b"[BOOT] Initializing Video...\r\n");
+        screen_print!(system_table, "[BOOT] Initializing Video (GOP)...");
         init_video(&system_table);
+        // After this, UEFI text output may not work (switched to graphics mode)
         early_serial_print(b"[BOOT] Video OK\r\n");
     }
     
