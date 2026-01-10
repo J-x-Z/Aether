@@ -6,3 +6,5 @@ OVMF.fd
 *.img
 *.iso
 .gemini/
+.DS_Store
+**/.DS_Store
