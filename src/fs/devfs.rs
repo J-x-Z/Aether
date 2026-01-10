@@ -127,13 +127,38 @@ pub struct DevTty;
 
 impl Inode for DevTty {
     fn read_at(&self, _offset: u64, buf: &mut [u8]) -> usize {
-        // Read from keyboard buffer (simplified)
-        // In real implementation, would block until input available
         if buf.is_empty() { return 0; }
         
-        // For now, return 0 (no input available)
-        // TODO: Hook into keyboard driver
-        0
+        // Simple blocking read for TTY
+        // We wait for at least one character
+        let mut nread = 0;
+        
+        loop {
+             // 1. Try Keyboard Buffer
+             if let Some(c) = crate::drivers::console_input::pop_char() {
+                 buf[nread] = c as u8;
+                 nread += 1;
+             } 
+             // 2. Try Serial Buffer/Hardware
+             else if let Some(c) = crate::drivers::console::read_serial() {
+                 buf[nread] = c;
+                 nread += 1;
+             }
+             
+             // If we have data, return it immediately (don't wait for full buffer)
+             // This gives interactive feel
+             if nread > 0 {
+                 return nread;
+             }
+             
+             // No data yet - Wait/Yield
+             // TODO: Use proper wait queue
+             #[cfg(target_arch = "x86_64")]
+             unsafe { core::arch::asm!("hlt"); }
+             
+             // Poll UEFI (hack for Hyper-V if interrupts are tricky)
+             crate::drivers::uefi_input::poll();
+        }
     }
     
     fn write_at(&self, _offset: u64, buf: &[u8]) -> usize {

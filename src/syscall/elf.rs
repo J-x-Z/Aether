@@ -130,6 +130,22 @@ pub fn load_elf(data: &[u8], base_addr: u64) -> Result<LoadedElf, &'static str> 
                 phdr_vaddr = base_addr + header.e_phoff + phdr.p_vaddr;
             }
             
+            // SERIAL DEBUG
+            unsafe {
+                crate::drivers::console::write_serial(b'S');
+                crate::drivers::console::write_serial(b'E');
+                crate::drivers::console::write_serial(b'G');
+                crate::drivers::console::write_serial(b':');
+                // Dump vaddr
+                let val = vaddr;
+                for i in (0..16).rev() {
+                    let digit = (val >> (i * 4)) & 0xF;
+                    let c = if digit < 10 { b'0' + digit as u8 } else { b'A' + (digit - 10) as u8 };
+                    crate::drivers::console::write_serial(c);
+                }
+                crate::drivers::console::write_serial(b'\n');
+            }
+            
             log::info!(
                 "[ELF] LOAD Segment {}: vaddr=0x{:x}, filesz={}, memsz={}", 
                 i, vaddr, phdr.p_filesz, phdr.p_memsz

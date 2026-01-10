@@ -4,6 +4,7 @@ SECTIONS {
     . = 0x400000; /* Start at 4MB for userspace */
     
     .text : {
+        *(.text.entry)
         *(.text .text.*)
     }
     
@@ -17,5 +18,11 @@ SECTIONS {
     
     .bss : {
         *(.bss .bss.*)
+    }
+
+    /DISCARD/ : {
+        *(.comment)
+        *(.note*)
+        *(.eh_frame*)
     }
 }

@@ -73,3 +73,42 @@ pub fn blit() {
         }
     }
 }
+
+/// Draw a colored bar on the framebuffer for panic/debug indication
+/// Works even when UEFI services are unavailable (after GDT switch)
+/// color: 0=Red, 1=Green, 2=Blue, 3=Yellow, 4=Magenta, 5=Cyan, 6=White
+pub fn panic_fb(color_index: u8, bar_index: u8) {
+    if let Some(ref v) = *VIDEO.lock() {
+        let color = match color_index {
+            0 => 0x00FF0000u32, // Red
+            1 => 0x0000FF00u32, // Green
+            2 => 0x000000FFu32, // Blue
+            3 => 0x00FFFF00u32, // Yellow
+            4 => 0x00FF00FFu32, // Magenta
+            5 => 0x0000FFFFu32, // Cyan
+            _ => 0x00FFFFFFu32, // White
+        };
+        
+        let bar_height = 50;
+        let y_start = (bar_index as usize) * bar_height;
+        let y_end = core::cmp::min(y_start + bar_height, v.height);
+        
+        unsafe {
+            for y in y_start..y_end {
+                for x in 0..v.width {
+                    let offset = y * v.stride + x;
+                    *v.base.add(offset) = color;
+                }
+            }
+        }
+    }
+}
+
+/// Draw panic info with multiple colored bars
+/// Pattern: Red-Green-Blue = Page Fault, Red-Red-Blue = GPF, etc.
+pub fn panic_pattern(colors: &[u8]) {
+    for (i, &c) in colors.iter().enumerate() {
+        panic_fb(c, i as u8);
+    }
+}
+

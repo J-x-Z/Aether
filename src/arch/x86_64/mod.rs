@@ -26,23 +26,27 @@ pub unsafe fn enter_usermode(entry_point: u64, stack_pointer: u64) -> ! {
     let user_ds = gdt::user_ds();
     
     // RFLAGS: Interrupts enabled (bit 9), Reserved (bit 1) should be 1
-    let rflags = 0x202; 
+    // RFLAGS: Interrupts enabled (bit 9), Reserved (bit 1) should be 1
+    let rflags: u64 = 0x202; 
     
     // IRETQ Stack Frame: SS, RSP, RFLAGS, CS, RIP
     core::arch::asm!(
         "cli", // Disable interrupts while setting up segments
-        "mov ds, {ds:x}",
-        "mov es, {ds:x}",
-        "mov fs, {ds:x}",
-        "mov gs, {ds:x}",
         
-        "push {ss}",  // SS
+        // Load NULL into data segment registers (safe in Ring0)
+        "xor ax, ax",
+        "mov ds, ax",
+        "mov es, ax",
+        "mov fs, ax",
+        "mov gs, ax",
+        
+        "push {ss}",  // SS (user data selector)
         "push {rsp}", // RSP
         "push {rflags}", // RFLAGS
-        "push {cs}",  // CS
+        "push {cs}",  // CS (user code selector)
         "push {rip}", // RIP
+        
         "iretq",
-        ds = in(reg) user_ds,
         ss = in(reg) user_ds as u64, // Pushed as u64
         rsp = in(reg) stack_pointer,
         rflags = in(reg) rflags,
@@ -50,4 +54,5 @@ pub unsafe fn enter_usermode(entry_point: u64, stack_pointer: u64) -> ! {
         rip = in(reg) entry_point,
         options(noreturn)
     );
+}
 }
