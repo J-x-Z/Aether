@@ -216,8 +216,20 @@ fn init_video(st: &SystemTable<Boot>) {
         }
     };
     
-    log::info!("[GOP] Step 3: Opening GOP protocol...");
-    let mut gop = match bt.open_protocol_exclusive::<GraphicsOutput>(gop_handle) {
+    log::info!("[GOP] Step 3: Opening GOP protocol (non-exclusive)...");
+    // Use unsafe open_protocol with GET_PROTOCOL attribute instead of exclusive
+    // Hyper-V may already have GOP open, exclusive access fails
+    use uefi::table::boot::OpenProtocolAttributes;
+    use uefi::table::boot::OpenProtocolParams;
+    let params = OpenProtocolParams {
+        handle: gop_handle,
+        agent: st.boot_services().image_handle(),
+        controller: None,
+    };
+    let gop_result = unsafe {
+        bt.open_protocol::<GraphicsOutput>(params, OpenProtocolAttributes::GetProtocol)
+    };
+    let mut gop = match gop_result {
         Ok(g) => {
             log::info!("[GOP] Step 3: OK - protocol opened");
             g
