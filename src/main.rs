@@ -112,6 +112,20 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     early_serial_print(b"[BOOT] Initializing Arch...\r\n");
     log::info!("[Kernel] Initializing Architecture...");
     
+    // DEBUG: Dump current segment selectors
+    unsafe {
+        use x86_64::instructions::segmentation::{CS, DS, ES, SS, FS, GS, Segment};
+        let cs = CS::get_reg().0;
+        let ds = DS::get_reg().0;
+        let ss = SS::get_reg().0;
+        let es = ES::get_reg().0;
+        let fs = FS::get_reg().0;
+        let gs = GS::get_reg().0;
+        
+        use core::fmt::Write;
+        let _ = write!(system_table.stdout(), "[Arch] Current Segments: CS={:x} SS={:x} DS={:x} ES={:x} FS={:x} GS={:x}\r\n", cs, ss, ds, es, fs, gs);
+    }
+    
     // Manual arch::init expansion for granular debugging
     unsafe { core::arch::asm!("cli", options(nomem, nostack)); }
     screen_print!(system_table, "[Arch] Interrupts disabled (CLI)");
