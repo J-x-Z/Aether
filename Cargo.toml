@@ -16,8 +16,7 @@ license = "GPL-3.0"
 repository = "https://github.com/J-x-Z/Aether"
 
 [dependencies]
-uefi = { version = "0.28" } # Removed features = ["alloc"]
-uefi-services = "0.25"
+uefi = { version = "0.28" }
 log = "0.4"
 aether-abi = { path = "./abi" }
 aether-core = { path = "./aether-core" }

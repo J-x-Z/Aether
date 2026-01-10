@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 #![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
+#![feature(alloc_error_handler)]
 
 extern crate alloc;
 
@@ -55,13 +56,31 @@ fn early_serial_print(s: &[u8]) {
 #[cfg(not(target_arch = "x86_64"))]
 fn early_serial_print(_s: &[u8]) {}
 
+#[cfg(not(test))]
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    early_serial_print(b"PANIC: ");
+    if let Some(location) = info.location() {
+        use core::fmt::Write;
+        // We can't easily format to serial without a writer, but we can try simple output
+        // Or just hang.
+    }
+    early_serial_print(b"KERNEL PANIC\r\n");
+    loop {
+        core::hint::spin_loop(); 
+    }
+}
+
 #[entry]
 fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // === EARLY DEBUG: Use UEFI text output to show on screen ===
     // This works before we switch to GOP graphics mode
     
-    // Initialize UEFI services first
-    uefi_services::init(&mut system_table).unwrap();
+    // Manual Logger Init (Simple Serial Log for now, or just rely on screen_print)
+    // uefi_services::init(&mut system_table).unwrap(); <-- REMOVED
+    
+    // Initialize UEFI services/console manually if needed
+    // But SystemTable is already usable.
     system_table.stdout().reset(false).unwrap();
     
     // Helper macro for screen output
@@ -151,26 +170,26 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     
     // 3. Initialize Memory Management
     early_serial_print(b"[BOOT] Initializing MM...\r\n");
-    log::info!("[Kernel] Initializing Memory Management...");
+    screen_print!(system_table, "[Kernel] Initializing Memory Management...");
     // STALL 2s
     system_table.boot_services().stall(2_000_000);
 
     let (phys_offset, memory_map_iter) = mm::init(&system_table);
-    log::info!("[Kernel] Memory Management initialized");
+    screen_print!(system_table, "[Kernel] Memory Management initialized");
     
     // 4. Initialize Filesystem (RamFS)
     early_serial_print(b"[BOOT] Initializing FS...\r\n");
-    log::info!("[Kernel] Initializing Filesystem...");
+    screen_print!(system_table, "[Kernel] Initializing Filesystem...");
     fs::init(phys_offset);
     // STALL 2s
     system_table.boot_services().stall(2_000_000);
     
     // 5. Initialize Scheduler
-    log::info!("[Kernel] Initializing Scheduler...");
+    screen_print!(system_table, "[Kernel] Initializing Scheduler...");
     sched::init();
     
     // 6. Initialize Drivers
-    log::info!("[Kernel] Initializing Drivers...");
+    screen_print!(system_table, "[Kernel] Initializing Drivers...");
     drivers::init();
     system_table.boot_services().stall(1_000_000); // STALL 1s
 
