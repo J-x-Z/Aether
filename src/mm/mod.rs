@@ -41,7 +41,9 @@ pub fn init(st: &SystemTable<Boot>) -> (u64, ()) {
                         // We need a contiguous chunk for our simple bump allocator.
                         // Choose the largest one.
                         // Filter out very low memory (< 1MB) which might be quirky.
-                        if size > max_size && desc.phys_start >= 0x100000 {
+                        // CRITICAL: Filter out memory > 4GB because our current paging only maps first 4GB!
+                        let end = desc.phys_start + size;
+                        if size > max_size && desc.phys_start >= 0x100000 && end < 0x100000000 {
                             max_size = size;
                             best_start = desc.phys_start;
                         }
