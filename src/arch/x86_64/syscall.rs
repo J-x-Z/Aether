@@ -71,69 +71,52 @@ unsafe fn wrmsr(msr: u32, value: u64) {
 }
 
 /// Syscall entry point (naked function)
-/// Called when userspace executes `syscall` instruction
-/// 
-/// At entry (from CPU):
-///   RCX = user RIP (saved by CPU for sysret)
-///   R11 = user RFLAGS (saved by CPU for sysret)
-///   RSP = user stack
-///   RAX = syscall number
-///   RDI = arg0, RSI = arg1, RDX = arg2, R10 = arg3, R8 = arg4, R9 = arg5
+/// At entry: RCX=user RIP, R11=user RFLAGS, RSP=user stack
+/// Syscall args: RAX=nr, RDI=a0, RSI=a1, RDX=a2, R10=a3, R8=a4, R9=a5
 #[unsafe(naked)]
 #[no_mangle]
 pub unsafe extern "C" fn syscall_entry() {
     core::arch::naked_asm!(
-        // ============================================================
-        // CRITICAL: Must preserve RCX (user RIP) and R11 (user RFLAGS)
-        // for sysretq to return correctly to userspace
-        // ============================================================
+        // ===== ULTRA-SIMPLE APPROACH =====
+        // Save syscall args to callee-saved registers IMMEDIATELY
+        // Syscall ABI (Linux): RAX=nr, RDI=a0, RSI=a1, RDX=a2, R10=a3, R8=a4, R9=a5
         
-        // Step 1: Save user RSP to r15, switch to kernel stack
-        "mov r15, rsp",
+        // Step 1: Save syscall args
+        "mov r12, rax",                     // r12 = syscall number
+        "mov r13, rdi",                     // r13 = a0  
+        "mov r14, rsi",                     // r14 = a1
+        "mov r15, rdx",                     // r15 = a2
+        
+        // Step 2: Save user RSP to rbx (callee-saved)
+        "mov rbx, rsp",
+        
+        // Step 3: Switch to kernel stack
         "lea rsp, [{kernel_rsp}]",
         "mov rsp, [rsp]",
         
-        // Step 2: Save user state that sysretq needs
-        "push r15",                         // User RSP
-        "push rcx",                         // User RIP (CRITICAL - for sysretq)
-        "push r11",                         // User RFLAGS (CRITICAL - for sysretq)
+        // Step 4: Push sysret state (on kernel stack)
+        "push rbx",                         // User RSP
+        "push rcx",                         // User RIP (syscall puts it here)
+        "push r11",                         // User RFLAGS (syscall puts it here)
         
-        // Step 3: Save syscall args to callee-saved registers
-        // (so they survive the function call)
-        "mov r15, rax",                     // r15 = syscall number
-        "mov r14, rdi",                     // r14 = a0
-        "mov r13, rsi",                     // r13 = a1
-        "mov r12, rdx",                     // r12 = a2 (save before it becomes arg2)
-        // r10, r8, r9 will become arg3-5, no need to save
+        // Step 5: Set up WINDOWS x64 calling convention for syscall_dispatch(nr, a0, a1, a2)
+        // UEFI target uses Windows ABI: RCX, RDX, R8, R9 (NOT Linux: RDI, RSI, RDX, RCX)
+        "mov rcx, r12",                     // RCX = syscall number
+        "mov rdx, r13",                     // RDX = a0
+        "mov r8, r14",                      // R8 = a1
+        "mov r9, r15",                      // R9 = a2
         
-        // Step 4: Set up C calling convention
-        // syscall_dispatch(nr, a0, a1, a2, a3, a4, a5)
-        // C: RDI, RSI, RDX, RCX, R8, R9
-        "mov rdi, r15",                     // RDI = syscall number
-        "mov rsi, r14",                     // RSI = a0
-        "mov rdx, r13",                     // RDX = a1
-        "mov rcx, r12",                     // RCX = a2
-        "mov r8, r10",                      // R8 = a3 (syscall a3 is in r10)
-        // R9 = a4 stays in r8? No, syscall a4 is already in r8
-        // Actually: syscall uses r8=a4, r9=a5
-        // So we need: C_r8 = syscall_a3 (r10), C_r9 = syscall_a4 (r8)
-        // But r8 already has syscall_a4, and we need r8 for C_a3
-        // This is tricky... let's save r8 first
-        "xchg r8, r10",                     // Now r8=a3, r10=a4
-        "mov r9, r10",                      // R9 = a4
-        
-        // Step 5: Call the Rust dispatcher
+        // Step 6: Call dispatcher
         "call syscall_dispatch",
         
         // RAX = return value
         
-        // Step 6: Restore user state for sysretq
-        // sysretq uses: RCX=user RIP, R11=user RFLAGS
+        // Step 7: Restore sysret state
         "pop r11",                          // User RFLAGS
         "pop rcx",                          // User RIP
         "pop rsp",                          // User RSP
         
-        // Step 7: Return to userspace
+        // Step 8: Return to userspace
         "sysretq",
         
         kernel_rsp = sym KERNEL_RSP0,
@@ -166,15 +149,8 @@ pub fn setup_syscall_stacks(kernel_stack_top: u64) {
 
 /// Rust syscall dispatcher (called from assembly)
 #[no_mangle]
-pub extern "C" fn syscall_dispatch(
-    nr: usize,
-    arg0: usize,
-    arg1: usize,
-    arg2: usize,
-    arg3: usize,
-    arg4: usize,
-    _arg5: usize,
-) -> isize {
+#[inline(never)]
+pub extern "C" fn syscall_dispatch(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
     log::debug!("[Syscall] nr={} a0=0x{:x} a1=0x{:x} a2=0x{:x}", nr, arg0, arg1, arg2);
     crate::syscall::dispatch(nr, arg0, arg1, arg2)
 }
