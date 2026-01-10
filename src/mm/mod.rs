@@ -12,13 +12,18 @@ pub fn init(_st: &SystemTable<Boot>) -> (u64, ()) {
     #[cfg(target_arch = "x86_64")]
     {
         // ============================================================
-        // ULTRA-MINIMAL DEBUG: Do absolutely NOTHING.
-        // Just return defaults to see if we can pass this point.
+        // DEBUG: Enable ONLY heap init, skip page tables
         // ============================================================
         
-        // Use default allocator addresses (set at compile time in paging.rs)
-        // Don't call init_allocator, don't call init_our_page_tables
-        // This should let us boot past this point.
+        let heap_start: u64 = 0x2000000; // 32MB
+        let heap_size: u64 = 0x1000000;  // 16MB
+        
+        // B. Init Global Heap (for Vec/Box)
+        unsafe {
+            crate::mm::heap::init(heap_start as usize, heap_size as usize);
+        }
+        
+        // Skip: crate::mm::paging::init_our_page_tables();
         
         (paging::PHYS_OFFSET, ())
     }
