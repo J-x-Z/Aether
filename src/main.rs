@@ -125,15 +125,20 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // 7. Load Init Process
     let init_path = if USE_SIMPLE_INIT { "/init" } else { "/bin/busybox" };
     log::info!("[Kernel] Loading {}...", init_path);
+    log::info!("[Kernel] DEBUG: About to call fs::open");
     if let Ok(inode) = fs::open(init_path, 0) {
+        log::info!("[Kernel] DEBUG: fs::open succeeded");
         // Allocate buffer for binary (2MB max)
+        log::info!("[Kernel] DEBUG: Allocating 2MB buffer...");
         let mut buffer = alloc::vec![0u8; 2 * 1024 * 1024];
+        log::info!("[Kernel] DEBUG: Buffer allocated, reading file...");
         let len = inode.read_at(0, &mut buffer);
         log::info!("[Kernel] Read {}: {} bytes", init_path, len);
         
         if len > 64 {
             use crate::syscall::elf::{load_elf, setup_user_stack, AuxvEntry, AT_PAGESZ};
             
+            log::info!("[Kernel] DEBUG: About to load ELF...");
             // Load ELF (static binary, base = 0)
             match load_elf(&buffer[..len], 0) {
                 Ok(loaded) => {
