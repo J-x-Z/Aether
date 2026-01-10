@@ -80,9 +80,10 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // 1. Initialize Video (GOP) - x86 only for now
     #[cfg(target_arch = "x86_64")]
     {
-        screen_print!(system_table, "[BOOT] Initializing Video (GOP)...");
+        screen_print!(system_table, "[BOOT] About to init GOP...");
+        // Wrap in catch_unwind-like structure to prevent panics
         init_video(&system_table);
-        // After this, UEFI text output may not work (switched to graphics mode)
+        screen_print!(system_table, "[BOOT] GOP init returned (may have failed gracefully)");
         early_serial_print(b"[BOOT] Video OK\r\n");
     }
     
@@ -197,19 +198,37 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
 #[cfg(target_arch = "x86_64")]
 fn init_video(st: &SystemTable<Boot>) {
     let bt = st.boot_services();
-    if let Ok(gop_handle) = bt.get_handle_for_protocol::<GraphicsOutput>() {
-        if let Ok(mut gop) = bt.open_protocol_exclusive::<GraphicsOutput>(gop_handle) {
-             let mode_info = gop.current_mode_info();
-             let (width, height) = mode_info.resolution();
-             let mut fb = gop.frame_buffer();
-             let fb_ptr = fb.as_mut_ptr();
-             let size = fb.size();
-             let stride = mode_info.stride();
-             
-             crate::video::init(fb_ptr, size, width, height, stride);
-             log::info!("[Video] Initialized {}x{} (stride: {})", width, height, stride);
+    
+    // Try to get GOP handle
+    let gop_handle = match bt.get_handle_for_protocol::<GraphicsOutput>() {
+        Ok(h) => h,
+        Err(e) => {
+            log::warn!("[Video] GOP not available: {:?} - continuing without graphics", e);
+            return;
         }
-    }
+    };
+    
+    // Try to open GOP protocol
+    let mut gop = match bt.open_protocol_exclusive::<GraphicsOutput>(gop_handle) {
+        Ok(g) => g,
+        Err(e) => {
+            log::warn!("[Video] Failed to open GOP: {:?} - continuing without graphics", e);
+            return;
+        }
+    };
+    
+    // Get mode info
+    let mode_info = gop.current_mode_info();
+    let (width, height) = mode_info.resolution();
+    let stride = mode_info.stride();
+    
+    // Get framebuffer - this might panic on some systems
+    let mut fb = gop.frame_buffer();
+    let fb_ptr = fb.as_mut_ptr();
+    let size = fb.size();
+    
+    crate::video::init(fb_ptr, size, width, height, stride);
+    log::info!("[Video] Initialized {}x{} (stride: {})", width, height, stride);
 }
 
 #[cfg(target_arch = "x86_64")]
