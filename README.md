@@ -96,10 +96,10 @@ Aether/
 - [x] Phase 14: POSIX Syscall Coverage
 - [x] Phase 15: ELF Dynamic Linker (kernel support)
 - [x] Phase 16: Virtual Filesystems (/dev, /proc)
-- [x] Phase 17: BusyBox Shell (Interactive w/ Input & Job Control)
-- [ ] Phase 12: ARM64 Platform Features (Device Tree, GIC, UART)
-- [ ] Phase 18: ext4 Filesystem
-- [ ] Phase 19: Real x86 Hardware Boot
+- [x] Phase 17: BusyBox Shell (Ring 3 Userspace Isolation)
+- [ ] Phase 18: Real x86 Hardware Boot (In Progress)
+- [ ] Phase 19: ext4 Filesystem
+- [ ] Phase 20: ARM64 Platform Features
 
 ## Related Projects
 
