@@ -193,16 +193,14 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     drivers::init();
     system_table.boot_services().stall(500_000); // STALL 0.5s
 
-    // 7. Enable Interrupts (SKIPPED FOR DEBUGGING)
-    screen_print!(system_table, "[Kernel] SKIPPING Interrupts (Avoid Crash)...");
-    /*
+    // 7. Enable Interrupts (Testing in QEMU)
+    screen_print!(system_table, "[Kernel] About to enable interrupts (STI)...");
+    system_table.boot_services().stall(1_000_000); // STALL 1s
     #[cfg(target_arch = "x86_64")]
     {
         interrupts::enable();
-        log::info!("[Kernel] Interrupts ENABLED");
-        // early_serial_print(b"[BOOT] Interrupts ENABLED\r\n");
+        screen_print!(system_table, "[Kernel] Interrupts ENABLED");
     }
-    */
     system_table.boot_services().stall(1_000_000); // STALL 1s
     
     // For testing: set to true to use simple init.bin instead of BusyBox
@@ -236,7 +234,7 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
             match load_elf(&buffer[..len], 0) {
                 Ok(loaded) => {
                     screen_print!(system_table, "[Kernel] BusyBox loaded!");
-                    system_table.boot_services().stall(3_000_000); // STALL 3s
+                    system_table.boot_services().stall(1_000_000); // STALL 1s
                     
                     // Set up Auxv
                     let auxv = alloc::vec![
@@ -250,13 +248,16 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                     // Set up stack (at high address)
                     let stack_top = 0x7FFFFF000000u64;
                     let stack_size = 128 * 1024; // 128KB
+                    
+                    screen_print!(system_table, "[Kernel] Mapping user stack...");
                     mm::paging::make_user_accessible(stack_top - stack_size, stack_size);
+                    screen_print!(system_table, "[Kernel] User stack mapped!");
                     
+                    screen_print!(system_table, "[Kernel] Setting up user stack...");
                     let user_sp = setup_user_stack(stack_top, argv, envp, &auxv);
+                    screen_print!(system_table, "[Kernel] User stack set up!");
                     
-                    log::info!("[Kernel] Entering BusyBox shell (Ring 3)...");
-                    log::info!("[Kernel]   Entry: 0x{:x}, Stack: 0x{:x}", loaded.entry_point, user_sp);
-                    
+                    screen_print!(system_table, "[Kernel] Setting up kernel stack for TSS...");
                     // CRITICAL: Allocate Kernel Stack for this process (PID 1) and update TSS!
                     // Otherwise interrupts/syscalls from Ring 3 will crash (Double Fault) due to RSP0=0.
                     let mut kernel_stack = alloc::vec![0u8; 128 * 1024]; // 128KB
@@ -271,10 +272,12 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                     
                     // Prevent deallocation of stack
                     core::mem::forget(kernel_stack);
+                    screen_print!(system_table, "[Kernel] Kernel stack ready!");
 
-                    log::info!("[Kernel] STALL before User Mode...");
-                    system_table.boot_services().stall(5_000_000); // LONG STALL 5s
+                    screen_print!(system_table, "[Kernel] STALL 3s before User Mode...");
+                    system_table.boot_services().stall(3_000_000); // STALL 3s
 
+                    screen_print!(system_table, "[Kernel] Jumping to Ring 3...");
                     // Jump to Ring 3
                     unsafe {
                         arch::enter_usermode(loaded.entry_point, user_sp);
