@@ -104,6 +104,8 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         init_video(&system_table);
         screen_print!(system_table, "[BOOT] GOP init returned");
         early_serial_print(b"[BOOT] Video OK\r\n");
+        // STALL 2s to see if GOP crashed
+        system_table.boot_services().stall(2_000_000); 
     } else {
         screen_print!(system_table, "[BOOT] GOP disabled for debugging");
     }
@@ -113,21 +115,32 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     log::info!("[Kernel] Initializing Architecture...");
     arch::init();
     early_serial_print(b"[BOOT] Arch OK, loading IDT...\r\n");
+    // STALL 2s
+    system_table.boot_services().stall(2_000_000);
     
     #[cfg(target_arch = "x86_64")]
     {
         interrupts::init_idt();
-        early_serial_print(b"[BOOT] IDT OK\r\n");
+        log::info!("[Kernel] IDT initialized");
     }
+    // STALL 2s
+    system_table.boot_services().stall(2_000_000);
     
     // 3. Initialize Memory Management
     early_serial_print(b"[BOOT] Initializing MM...\r\n");
     log::info!("[Kernel] Initializing Memory Management...");
-    mm::init();
+    // STALL 2s
+    system_table.boot_services().stall(2_000_000);
+
+    let (phys_offset, memory_map_iter) = mm::init(&system_table);
+    log::info!("[Kernel] Memory Management initialized");
     
-    // 4. Initialize Filesystem
+    // 4. Initialize Filesystem (RamFS)
+    early_serial_print(b"[BOOT] Initializing FS...\r\n");
     log::info!("[Kernel] Initializing Filesystem...");
-    fs::init();
+    fs::init(phys_offset);
+    // STALL 2s
+    system_table.boot_services().stall(2_000_000);
     
     // 5. Initialize Scheduler
     log::info!("[Kernel] Initializing Scheduler...");
