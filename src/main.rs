@@ -78,13 +78,16 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     screen_print!(system_table, "[BOOT] Log initialized");
     
     // 1. Initialize Video (GOP) - x86 only for now
+    // TEMPORARILY DISABLED for real hardware debugging
+    const ENABLE_GOP: bool = false;
     #[cfg(target_arch = "x86_64")]
-    {
+    if ENABLE_GOP {
         screen_print!(system_table, "[BOOT] About to init GOP...");
-        // Wrap in catch_unwind-like structure to prevent panics
         init_video(&system_table);
-        screen_print!(system_table, "[BOOT] GOP init returned (may have failed gracefully)");
+        screen_print!(system_table, "[BOOT] GOP init returned");
         early_serial_print(b"[BOOT] Video OK\r\n");
+    } else {
+        screen_print!(system_table, "[BOOT] GOP disabled for debugging");
     }
     
     // 2. Initialize Architecture
