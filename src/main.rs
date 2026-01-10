@@ -61,13 +61,17 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     log::info!("[Kernel] Initializing Drivers...");
     drivers::init();
     
-    // 7. Load Init Process (BusyBox shell)
-    log::info!("[Kernel] Loading /bin/busybox...");
-    if let Ok(inode) = fs::open("/bin/busybox", 0) {
-        // Allocate buffer for busybox (2MB max)
+    // For testing: set to true to use simple init.bin instead of BusyBox
+    const USE_SIMPLE_INIT: bool = true;
+    
+    // 7. Load Init Process
+    let init_path = if USE_SIMPLE_INIT { "/init" } else { "/bin/busybox" };
+    log::info!("[Kernel] Loading {}...", init_path);
+    if let Ok(inode) = fs::open(init_path, 0) {
+        // Allocate buffer for binary (2MB max)
         let mut buffer = alloc::vec![0u8; 2 * 1024 * 1024];
         let len = inode.read_at(0, &mut buffer);
-        log::info!("[Kernel] Read busybox: {} bytes", len);
+        log::info!("[Kernel] Read {}: {} bytes", init_path, len);
         
         if len > 64 {
             use crate::syscall::elf::{load_elf, setup_user_stack, AuxvEntry, AT_PAGESZ};
@@ -103,6 +107,11 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                     unsafe {
                         crate::arch::x86_64::gdt::set_interrupt_stack(kernel_stack_top);
                     }
+                    
+                    // Set up syscall kernel stack (for swapgs-based syscall handling)
+                    #[cfg(target_arch = "x86_64")]
+                    crate::arch::x86_64::syscall::setup_syscall_stacks(kernel_stack_top);
+                    
                     // Prevent deallocation of stack
                     core::mem::forget(kernel_stack);
 

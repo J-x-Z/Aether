@@ -72,18 +72,47 @@ unsafe fn wrmsr(msr: u32, value: u64) {
 
 /// Syscall entry point (naked function)
 /// Called when userspace executes `syscall` instruction
+/// 
+/// At entry (from CPU):
+///   RCX = user RIP (saved by CPU for sysret)
+///   R11 = user RFLAGS (saved by CPU for sysret)
+///   RSP = user stack (DANGER: we're in Ring 0 but on user stack!)
+///   RAX = syscall number
+///   RDI, RSI, RDX, R10, R8, R9 = syscall arguments
+///
+/// This function:
+///   1. swapgs to get kernel GS base
+///   2. Switch to kernel stack (from GS-based per-CPU storage)
+///   3. Save user registers
+///   4. Call Rust syscall dispatcher
+///   5. Restore user registers
+///   6. Switch back to user stack
+///   7. swapgs back
+///   8. sysretq
 #[unsafe(naked)]
-// But wait, #[naked] is feature(naked_functions). I didn't enable it in main.rs?
-// main.rs has #![feature(abi_x86_interrupt)].
-// I should add #![feature(naked_functions)] to lib.rs or main.rs if it's a bin.
-// But this module is part of the binary crate 'aether'.
 #[no_mangle]
 pub unsafe extern "C" fn syscall_entry() {
     core::arch::naked_asm!(
-        // Save user stack pointer (in rcx after syscall)
-        // rcx = user RIP, r11 = user RFLAGS
+        // ============================================================
+        // ENTRY: We're in Ring 0 but on USER STACK - be very careful!
+        // ============================================================
         
-        // Push callee-saved registers
+        // Step 1: Swap GS (now GS points to kernel per-CPU data)
+        "swapgs",
+        
+        // Step 2: Save user RSP to kernel per-CPU scratch, load kernel RSP
+        // We use a global variable since we don't have proper per-CPU yet
+        // KERNEL_SCRATCH_RSP is set before entering usermode
+        "mov gs:[{scratch_rsp}], rsp",      // Save user RSP to scratch
+        "mov rsp, gs:[{kernel_rsp}]",       // Load kernel RSP
+        
+        // Step 3: Now we're on kernel stack - safe to push
+        // Save user registers that we need to preserve
+        "push rcx",                         // User RIP
+        "push r11",                         // User RFLAGS
+        "push gs:[{scratch_rsp}]",          // User RSP (from scratch)
+        
+        // Save all callee-saved registers
         "push rbx",
         "push rbp",
         "push r12",
@@ -91,28 +120,22 @@ pub unsafe extern "C" fn syscall_entry() {
         "push r14",
         "push r15",
         
-        // Save user RIP and RFLAGS
-        "push rcx",  // User RIP
-        "push r11",  // User RFLAGS
-        
-        // Arguments are already in correct registers for our dispatch
-        // rax = syscall number
-        // rdi = arg0, rsi = arg1, rdx = arg2, r10 = arg3, r8 = arg4, r9 = arg5
-        
-        // Move r10 to rcx for C calling convention (arg3)
+        // Step 4: Set up arguments for syscall_dispatch
+        // RAX = syscall number (already there)
+        // RDI = arg0 (already there)  
+        // RSI = arg1 (already there)
+        // RDX = arg2 (already there)
+        // RCX = arg3 (need to move from R10)
+        // R8 = arg4 (already there)
+        // R9 = arg5 (already there)
         "mov rcx, r10",
         
-        // Call Rust syscall dispatcher
-        // fn syscall_dispatch(nr: usize, a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> isize
+        // Call the Rust dispatcher
         "call syscall_dispatch",
         
-        // Return value is in rax
+        // RAX now contains return value
         
-        // Restore user RFLAGS and RIP
-        "pop r11",
-        "pop rcx",
-        
-        // Restore callee-saved registers
+        // Step 5: Restore callee-saved registers
         "pop r15",
         "pop r14",
         "pop r13",
@@ -120,9 +143,49 @@ pub unsafe extern "C" fn syscall_entry() {
         "pop rbp",
         "pop rbx",
         
-        // Return to userspace
+        // Step 6: Restore user RSP, RIP, RFLAGS
+        "pop gs:[{scratch_rsp}]",           // User RSP to scratch
+        "pop r11",                          // User RFLAGS
+        "pop rcx",                          // User RIP
+        
+        // Switch back to user stack
+        "mov rsp, gs:[{scratch_rsp}]",
+        
+        // Step 7: Swap GS back to user GS
+        "swapgs",
+        
+        // Step 8: Return to userspace
+        // sysretq loads RIP from RCX, RFLAGS from R11
         "sysretq",
+        
+        // Symbol references
+        scratch_rsp = sym SCRATCH_USER_RSP,
+        kernel_rsp = sym KERNEL_RSP0,
     );
+}
+
+/// Per-CPU data for syscall handling
+/// These are accessed via GS segment in syscall_entry
+/// For now, we use simple globals (single-CPU)
+#[no_mangle]
+pub static mut SCRATCH_USER_RSP: u64 = 0;
+
+#[no_mangle]
+pub static mut KERNEL_RSP0: u64 = 0;
+
+/// Set up the kernel stack for syscall handling
+/// Call this BEFORE entering usermode
+pub fn setup_syscall_stacks(kernel_stack_top: u64) {
+    unsafe {
+        KERNEL_RSP0 = kernel_stack_top;
+        
+        // Set up GS base to point to our per-CPU data area
+        // For simplicity, we set GS base to 0 and use absolute addresses
+        // In a real OS, you'd use a per-CPU structure
+        use x86_64::registers::model_specific::GsBase;
+        GsBase::write(x86_64::VirtAddr::new(0));
+    }
+    log::debug!("[Syscall] Kernel RSP0 set to 0x{:x}", kernel_stack_top);
 }
 
 /// Rust syscall dispatcher (called from assembly)
