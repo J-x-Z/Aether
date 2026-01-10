@@ -127,25 +127,36 @@ use x86_64::structures::gdt::SegmentSelector;
 pub fn init_idt() {
     info!("[Aether::Interrupts] Initializing IDT...");
     
+    // CRITICAL FIX: Force CS to correct Kernel Code Selector (0x38)
+    // 0x08 is User Data in our new GDT!
+    unsafe { 
+        CS::set_reg(SegmentSelector(crate::arch::x86_64::gdt::kernel_cs())); 
+    }
+    
     let idt = IDT.call_once(create_idt);
     idt.load();
     info!("[Aether::Interrupts] IDT loaded");
-
+    
     unsafe { 
         let mut pics = PICS.lock();
         pics.initialize();
         info!("[Aether::Interrupts] PICS initialized");
         
-        // Unmask IRQ 0 (Timer), IRQ 1 (Keyboard) and IRQ 4 (Serial)
+        // Manual Unmasking of IRQ 1 (Keyboard) and IRQ 4 (Serial)
         let mut master_data = x86_64::instructions::port::Port::<u8>::new(0x21);
         let mask = master_data.read();
-        let new_mask = mask & !( (1 << 0) | (1 << 1) | (1 << 4) );
+        let new_mask = mask & !( (1 << 1) | (1 << 4) );
         master_data.write(new_mask);
     }
     info!("[Aether::Interrupts] IRQs unmasked");
 
     init_pit();
     info!("[Aether::Interrupts] PIT initialized");
+    
+    // NOW it's safe: Our GDT is loaded, our IDT is loaded with correct CS, PICs are configured.
+    // BUT we should NOT enable interrupts yet. wait until MM and SCHED are ready.
+    // unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+    info!("[Aether::Interrupts] IDT ready, interrupts disabled (waiting for Kernel Init).");
 }
 
 pub fn enable() {
@@ -162,9 +173,6 @@ extern "x86-interrupt" fn breakpoint_handler(
 extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame, _error_code: u64) -> !
 {
-    // FRAMEBUFFER DEBUG: Red-Red pattern for Double Fault
-    crate::video::panic_pattern(&[0, 0]); // Red-Red
-    
     // SERIAL DEBUG: "D" for Double Fault
     crate::drivers::console::write_serial(b'!');
     crate::drivers::console::write_serial(b'D');
@@ -177,41 +185,12 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: x86_64::structures::idt::PageFaultErrorCode,
 ) {
-    // FRAMEBUFFER DEBUG: Red-Green-Blue pattern for Page Fault
-    crate::video::panic_pattern(&[0, 1, 2]); // Red-Green-Blue
-    
     use x86_64::registers::control::Cr2;
     // SERIAL DEBUG: "P" for Page Fault
     crate::drivers::console::write_serial(b'!');
     crate::drivers::console::write_serial(b'P');
     crate::drivers::console::write_serial(b'F');
     crate::drivers::console::write_serial(b'\n');
-    
-    // Hex dump CR2 (Faulting Address)
-    unsafe {
-        let cr2 = Cr2::read_raw();
-        crate::drivers::console::write_serial(b'A');
-        crate::drivers::console::write_serial(b':');
-        for i in (0..16).rev() {
-            let digit = (cr2 >> (i * 4)) & 0xF;
-            let c = if digit < 10 { b'0' + digit as u8 } else { b'A' + (digit - 10) as u8 };
-            crate::drivers::console::write_serial(c);
-        }
-        crate::drivers::console::write_serial(b'\n');
-    }
-
-    // Hex dump Error Code
-    unsafe {
-        let code = error_code.bits();
-        crate::drivers::console::write_serial(b'E');
-        crate::drivers::console::write_serial(b':');
-        for i in (0..16).rev() {
-            let digit = (code >> (i * 4)) & 0xF;
-            let c = if digit < 10 { b'0' + digit as u8 } else { b'A' + (digit - 10) as u8 };
-            crate::drivers::console::write_serial(c);
-        }
-        crate::drivers::console::write_serial(b'\n');
-    }
     
     log::error!("[EXCEPTION] PAGE FAULT");
     log::error!("Accessed Address: {:?}", Cr2::read());
@@ -223,28 +202,12 @@ extern "x86-interrupt" fn page_fault_handler(
 extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame, error_code: u64)
 {
-    // FRAMEBUFFER DEBUG: Red-Red-Blue pattern for GPF
-    crate::video::panic_pattern(&[0, 0, 2]); // Red-Red-Blue
-    
     // SERIAL DEBUG: "G" for GPF
     crate::drivers::console::write_serial(b'!');
     crate::drivers::console::write_serial(b'G');
     crate::drivers::console::write_serial(b'P');
     crate::drivers::console::write_serial(b'F');
     crate::drivers::console::write_serial(b'\n');
-    
-    // Hex dump error code
-    unsafe {
-        let code = error_code;
-        crate::drivers::console::write_serial(b'E');
-        crate::drivers::console::write_serial(b':');
-        for i in (0..16).rev() {
-            let digit = (code >> (i * 4)) & 0xF;
-            let c = if digit < 10 { b'0' + digit as u8 } else { b'A' + (digit - 10) as u8 };
-            crate::drivers::console::write_serial(c);
-        }
-        crate::drivers::console::write_serial(b'\n');
-    }
     
     log::error!("[EXCEPTION] GENERAL PROTECTION FAULT\nError Code: {}\n{:#?}", error_code, stack_frame);
     panic!("GPF");
@@ -253,9 +216,6 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 extern "x86-interrupt" fn invalid_opcode_handler(
     stack_frame: InterruptStackFrame) 
 {
-    // FRAMEBUFFER DEBUG: Yellow pattern for Invalid Opcode
-    crate::video::panic_pattern(&[3, 3]); // Yellow-Yellow
-    
     log::error!("[EXCEPTION] INVALID OPCODE\n{:#?}", stack_frame);
     panic!("Invalid Opcode");
 }
@@ -312,6 +272,8 @@ extern "x86-interrupt" fn serial_interrupt_handler(_stack_frame: InterruptStackF
     if let Some(byte) = crate::drivers::console::read_serial() {
          // Push to global buffer
          crate::drivers::console_input::push_char(byte as char);
+         // Local echo optional
+         // print!("{}", byte as char);
     }
     
     // Notify PICS
@@ -330,7 +292,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(
     crate::sched::check_timers();
 
     // Blit Shadow Buffer to Screen
-    // crate::video::blit(); // DISABLED FOR PERFORMANCE
+    crate::video::blit();
 
     // Preemptive Multitasking
     // Try to lock scheduler

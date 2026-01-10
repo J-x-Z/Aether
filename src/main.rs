@@ -35,7 +35,7 @@ use uefi::proto::console::gop::GraphicsOutput;
 fn early_serial_print(s: &[u8]) {
     // Serial port can hang bare metal if not present (reading 0x00 from status = infinite loop)
     // Default to FALSE for safety on real hardware. Enable for QEMU only.
-    const ENABLE_SERIAL: bool = true;
+    const ENABLE_SERIAL: bool = false;
     
     if !ENABLE_SERIAL { return; }
 
@@ -56,14 +56,6 @@ fn early_serial_print(s: &[u8]) {
 #[cfg(not(target_arch = "x86_64"))]
 fn early_serial_print(_s: &[u8]) {}
 
-struct SerialWriter;
-impl core::fmt::Write for SerialWriter {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        for b in s.bytes() { crate::drivers::console::write_serial(b); }
-        Ok(())
-    }
-}
-
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -71,9 +63,10 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     let msg = b"\n!!!! KERNEL PANIC !!!!\n";
     for &b in msg { crate::drivers::console::write_serial(b); }
     
-    use core::fmt::Write;
-    let mut writer = SerialWriter;
-    let _ = write!(writer, "{}\n", info);
+    if let Some(location) = info.location() {
+        // We can't format easily without alloc, but we can print basic info if possible
+        // For now, just a marker
+    }
     
     loop {
         core::hint::spin_loop(); 
@@ -181,7 +174,7 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     early_serial_print(b"[BOOT] Initializing MM...\r\n");
     screen_print!(system_table, "[Kernel] Initializing Memory Management...");
     // STALL 0.5s
-    // system_table.boot_services().stall(500_000);
+    system_table.boot_services().stall(500_000);
 
     let (phys_offset, memory_map_iter) = mm::init(&system_table);
     screen_print!(system_table, "[Kernel] Memory Management initialized");
@@ -191,7 +184,7 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     screen_print!(system_table, "[Kernel] Initializing Filesystem...");
     fs::init(phys_offset);
     // STALL 0.5s
-    // system_table.boot_services().stall(500_000);
+    system_table.boot_services().stall(500_000);
     
     // 5. Initialize Scheduler
     screen_print!(system_table, "[Kernel] Initializing Scheduler...");
@@ -200,11 +193,11 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // 6. Initialize Drivers
     screen_print!(system_table, "[Kernel] Initializing Drivers...");
     drivers::init();
-    // system_table.boot_services().stall(500_000); // STALL 0.5s
+    system_table.boot_services().stall(500_000); // STALL 0.5s
 
     // 7. Enable Interrupts (Testing in QEMU)
     screen_print!(system_table, "[Kernel] About to enable interrupts (STI)...");
-    // system_table.boot_services().stall(1_000_000); // STALL 1s
+    system_table.boot_services().stall(1_000_000); // STALL 1s
     #[cfg(target_arch = "x86_64")]
     {
         interrupts::enable();
@@ -218,8 +211,6 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // 7. Load Init Process
     let init_path = if USE_SIMPLE_INIT { "/init" } else { "/bin/busybox" };
     screen_print!(system_table, "[Kernel] Loading init...");
-    let msg_path = alloc::format!("[Kernel] Init Path: {}", init_path);
-    screen_print!(system_table, msg_path.as_str());
 
     screen_print!(system_table, "[Kernel] DEBUG: About to call fs::open");
 
@@ -233,6 +224,8 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         let len = inode.read_at(0, &mut buffer);
         screen_print!(system_table, "[Kernel] DEBUG: Read bytes");
         
+        system_table.boot_services().stall(1_000_000); // STALL 1s
+
         if len > 64 {
             use crate::syscall::elf::{load_elf, setup_user_stack, AuxvEntry, AT_PAGESZ};
             
@@ -243,7 +236,7 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
             match load_elf(&buffer[..len], 0) {
                 Ok(loaded) => {
                     screen_print!(system_table, "[Kernel] BusyBox loaded!");
-                    // system_table.boot_services().stall(1_000_000); // STALL 1s
+                    system_table.boot_services().stall(1_000_000); // STALL 1s
                     
                     // Set up Auxv
                     let auxv = alloc::vec![
@@ -255,31 +248,16 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                     let envp: &[&[u8]] = &[];
                     
                     // Set up stack (at high address)
-                    let stack_top = 0x10000000u64; // 256MB (Safe Low Memory)
+                    let stack_top = 0x7FFFFF000000u64;
                     let stack_size = 128 * 1024; // 128KB
                     
                     screen_print!(system_table, "[Kernel] Mapping user stack...");
                     mm::paging::make_user_accessible(stack_top - stack_size, stack_size);
                     screen_print!(system_table, "[Kernel] User stack mapped!");
                     
-                    // PROBE STACK
-                    unsafe {
-                        let ptr = (stack_top - 8) as *mut u64;
-                        // Use format! for complex logs
-                        let s = alloc::format!("[Kernel] Probing stack at {:p}...", ptr);
-                        screen_print!(system_table, s.as_str());
-                        
-                        *ptr = 0xAA55AA55;
-                        
-                        let s2 = alloc::format!("[Kernel] Probe OK: 0x{:x}", *ptr);
-                        screen_print!(system_table, s2.as_str());
-                    }
-                    
                     screen_print!(system_table, "[Kernel] Setting up user stack...");
                     let user_sp = setup_user_stack(stack_top, argv, envp, &auxv);
-                    
-                    let s3 = alloc::format!("[Kernel] User stack set up! SP=0x{:x}", user_sp);
-                    screen_print!(system_table, s3.as_str());
+                    screen_print!(system_table, "[Kernel] User stack set up!");
                     
                     screen_print!(system_table, "[Kernel] Setting up kernel stack for TSS...");
                     // CRITICAL: Allocate Kernel Stack for this process (PID 1) and update TSS!
@@ -297,22 +275,9 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                     // Prevent deallocation of stack
                     core::mem::forget(kernel_stack);
                     screen_print!(system_table, "[Kernel] Kernel stack ready!");
-                    
-                    // DEBUG: Dump code at entry point
-                    unsafe {
-                         let entry_ptr = loaded.entry_point as *const u64;
-                         let w1 = *entry_ptr;
-                         let w2 = *entry_ptr.add(1);
-                         
-                         let msg_ep = alloc::format!("[Kernel] Entry Point: 0x{:x}", loaded.entry_point);
-                         screen_print!(system_table, msg_ep.as_str());
-
-                         let msg_code = alloc::format!("[Kernel] CODE at 0x{:x}: {:016x} {:016x}", loaded.entry_point, w1, w2);
-                         screen_print!(system_table, msg_code.as_str());
-                    }
 
                     screen_print!(system_table, "[Kernel] STALL 3s before User Mode...");
-                    // system_table.boot_services().stall(3_000_000); // STALL 3s
+                    system_table.boot_services().stall(3_000_000); // STALL 3s
 
                     screen_print!(system_table, "[Kernel] Jumping to Ring 3...");
                     // Jump to Ring 3

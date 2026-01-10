@@ -2,7 +2,7 @@
 use alloc::vec::Vec;
 
 /// Embedded Init Binary
-static INIT_BIN: &[u8] = include_bytes!("../../init/init.elf");
+static INIT_BIN: &[u8] = include_bytes!("../../init/init.bin");
 
 /// Embedded BusyBox Binary (static musl build)
 static BUSYBOX_BIN: &[u8] = include_bytes!("../../init/busybox.bin");

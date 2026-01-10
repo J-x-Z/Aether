@@ -160,6 +160,17 @@ pub mod numbers {
 
 /// Main syscall dispatcher
 pub fn dispatch(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
+    // Debug: Log syscall number via serial
+    // Only log important syscalls to avoid spam
+    if nr == numbers::SYS_WRITE || nr == numbers::SYS_READ || nr == numbers::SYS_EXIT {
+        // Simple debug: write 'S' + syscall number digit to serial
+        crate::drivers::console::write_serial(b'[');
+        crate::drivers::console::write_serial(b'S');
+        crate::drivers::console::write_serial(b'0' + (nr / 10) as u8);
+        crate::drivers::console::write_serial(b'0' + (nr % 10) as u8);
+        crate::drivers::console::write_serial(b']');
+    }
+    
     // Sanity check: Linux x86_64 has ~450 syscalls, anything much larger is suspicious
     if nr > 500 {
         return -38; // ENOSYS
@@ -316,33 +327,13 @@ fn sys_read(fd: usize, buf_ptr: usize, count: usize) -> isize {
         let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, count) };
         let mut nread = 0;
         
-        // Enable interrupts for the entire syscall (needed to receive serial IRQ)
-        unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
-        
-        // BLOCKING READ: Wait for at least one character
-        loop {
-            // Try console_input buffer first (keyboard/serial IRQ)
-            if let Some(c) = crate::drivers::console_input::pop_char() {
-                buf[nread] = c;
-                nread += 1;
-                break;
-            }
-            // Fallback: Direct serial poll
-            if let Some(c) = crate::drivers::console::read_serial() {
-                buf[nread] = c;
-                nread += 1;
-                break;
-            }
-            // No data - halt CPU until next interrupt
-            unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
-        }
-        
-        // Read more if available (non-blocking)
+        // Try to read at least one char (from buffer OR hardware)
         while nread < count {
             if let Some(c) = crate::drivers::console_input::pop_char() {
                 buf[nread] = c;
                 nread += 1;
             } else if let Some(c) = crate::drivers::console::read_serial() {
+                // Fallback: Poll hardware directly
                 buf[nread] = c;
                 nread += 1;
             } else {
@@ -350,7 +341,14 @@ fn sys_read(fd: usize, buf_ptr: usize, count: usize) -> isize {
             }
         }
         
-        return nread as isize;
+        if nread > 0 {
+            return nread as isize;
+        } else {
+            // No data available
+            // If strict blocking is needed, we should yield.
+            // For now, return EAGAIN to let busybox poll.
+            return -11; // EAGAIN
+        }
     }
 
     let current_lock = CURRENT_TASK.lock();
@@ -507,12 +505,9 @@ fn sys_fstat(fd: usize, statbuf: usize) -> isize {
     if statbuf != 0 {
         unsafe {
             let buf = statbuf as *mut u64;
-            // Mode:
-            // S_IFCHR (0020000) for stdin/out/err (FD 0,1,2)
-            // S_IFREG (0100000) for others
-            let mode = if fd <= 2 { 0o020666 } else { 0o100644 };
-            
-            *buf.add(1) = mode as u64; // st_mode at offset 8 (u64 field)
+            // Minimal stat: just set st_mode to regular file (0100644)
+            *buf.add(1) = 0o100644; // st_mode at offset 8
+            // Set st_size to 0
             *buf.add(6) = 0; // st_size at offset 48
         }
     }
@@ -557,22 +552,13 @@ fn sys_nanosleep(req: usize, _rem: usize) -> isize {
     0
 }
 
-fn sys_ioctl(_fd: usize, cmd: usize, arg: usize) -> isize {
+fn sys_ioctl(_fd: usize, cmd: usize, _arg: usize) -> isize {
     // Common ioctl commands - return success for terminal queries
     match cmd {
         0x5401 => 0,  // TCGETS - pretend we're a terminal
         0x5402 => 0,  // TCSETS
         0x5413 => {   // TIOCGWINSZ - get window size
-            if arg != 0 {
-                // struct winsize { unsigned short ws_row, ws_col, ws_xpixel, ws_ypixel; };
-                unsafe {
-                    let ptr = arg as *mut u16;
-                    *ptr.add(0) = 25 as u16;  // rows
-                    *ptr.add(1) = 80 as u16;  // cols
-                    *ptr.add(2) = 0;   // xpixel
-                    *ptr.add(3) = 0;   // ypixel
-                }
-            }
+            // Would fill in winsize struct if arg is valid
             0
         }
         _ => {
