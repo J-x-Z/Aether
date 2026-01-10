@@ -56,8 +56,27 @@ pub fn init(st: &SystemTable<Boot>) -> (u64, ()) {
             log::info!("[MM] Largest Free RAM: 0x{:x} ({} MB)", best_start, max_size / 1024 / 1024);
             
             // 3. Initialize Allocator with safe region
-            // Reserve some space to avoid edge cases?
-            crate::mm::paging::init_allocator(best_start, max_size);
+            
+            // WE NEED TO SPLIT THE MEMORY:
+            // Region 1: Bump Allocator for Page Tables (needs ~16MB+)
+            // Region 2: Generic Heap (Vec, Box, etc) (needs rest)
+            
+            let pt_size = 16 * 1024 * 1024; // 16MB for Paging Structures
+            if max_size < pt_size * 2 {
+                log::error!("[MM] Not enough RAM for Heap+Paging!");
+            }
+            
+            let pt_start = best_start;
+            let heap_start = best_start + pt_size;
+            let heap_size = max_size - pt_size;
+            
+            // A. Init Bump Allocator (for Page Tables)
+            crate::mm::paging::init_allocator(pt_start, pt_size);
+            
+            // B. Init Global Heap (for Vec/Box)
+            unsafe {
+                crate::mm::heap::init(heap_start as usize, heap_size as usize);
+            }
         } else {
             log::error!("[MM] CRITICAL: No Conventional Memory found!");
             // Fallback to defaults (will likely crash)
