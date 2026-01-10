@@ -200,62 +200,55 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
 
 #[cfg(target_arch = "x86_64")]
 fn init_video(st: &SystemTable<Boot>) {
-    use core::fmt::Write as _;
-    
-    // Helper for screen output during GOP init
-    let print = |msg: &str| {
-        let _ = core::fmt::Write::write_str(st.stdout(), msg);
-        let _ = core::fmt::Write::write_str(st.stdout(), "\r\n");
-    };
-    
-    print("[GOP] Step 1: Getting boot services...");
+    // Use serial for debugging since screen output is complex
+    early_serial_print(b"[GOP] Step 1: Getting boot services...\r\n");
     let bt = st.boot_services();
     
-    print("[GOP] Step 2: Getting GOP handle...");
+    early_serial_print(b"[GOP] Step 2: Getting GOP handle...\r\n");
     let gop_handle = match bt.get_handle_for_protocol::<GraphicsOutput>() {
         Ok(h) => {
-            print("[GOP] Step 2: OK - got handle");
+            early_serial_print(b"[GOP] Step 2: OK - got handle\r\n");
             h
         },
         Err(e) => {
             log::warn!("[Video] GOP not available: {:?}", e);
-            print("[GOP] Step 2: FAILED - no GOP handle");
+            early_serial_print(b"[GOP] Step 2: FAILED - no GOP handle\r\n");
             return;
         }
     };
     
-    print("[GOP] Step 3: Opening GOP protocol...");
+    early_serial_print(b"[GOP] Step 3: Opening GOP protocol...\r\n");
     let mut gop = match bt.open_protocol_exclusive::<GraphicsOutput>(gop_handle) {
         Ok(g) => {
-            print("[GOP] Step 3: OK - protocol opened");
+            early_serial_print(b"[GOP] Step 3: OK - protocol opened\r\n");
             g
         },
         Err(e) => {
             log::warn!("[Video] Failed to open GOP: {:?}", e);
-            print("[GOP] Step 3: FAILED - cannot open protocol");
+            early_serial_print(b"[GOP] Step 3: FAILED - cannot open protocol\r\n");
             return;
         }
     };
     
-    print("[GOP] Step 4: Getting mode info...");
+    early_serial_print(b"[GOP] Step 4: Getting mode info...\r\n");
     let mode_info = gop.current_mode_info();
     let (width, height) = mode_info.resolution();
     let stride = mode_info.stride();
-    print("[GOP] Step 4: OK - got mode info");
+    early_serial_print(b"[GOP] Step 4: OK - got mode info\r\n");
     
-    print("[GOP] Step 5: Getting framebuffer...");
+    early_serial_print(b"[GOP] Step 5: Getting framebuffer...\r\n");
     let mut fb = gop.frame_buffer();
-    print("[GOP] Step 5: OK - got framebuffer");
+    early_serial_print(b"[GOP] Step 5: OK - got framebuffer\r\n");
     
-    print("[GOP] Step 6: Getting framebuffer pointer...");
+    early_serial_print(b"[GOP] Step 6: Getting framebuffer pointer...\r\n");
     let fb_ptr = fb.as_mut_ptr();
     let size = fb.size();
-    print("[GOP] Step 6: OK - got pointer");
+    early_serial_print(b"[GOP] Step 6: OK - got pointer\r\n");
     
-    print("[GOP] Step 7: Initializing video subsystem...");
+    early_serial_print(b"[GOP] Step 7: Initializing video subsystem...\r\n");
     crate::video::init(fb_ptr, size, width, height, stride);
     log::info!("[Video] Initialized {}x{} (stride: {})", width, height, stride);
-    print("[GOP] COMPLETE - video initialized");
+    early_serial_print(b"[GOP] COMPLETE - video initialized\r\n");
 }
 
 #[cfg(target_arch = "x86_64")]
