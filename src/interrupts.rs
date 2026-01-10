@@ -312,8 +312,6 @@ extern "x86-interrupt" fn serial_interrupt_handler(_stack_frame: InterruptStackF
     if let Some(byte) = crate::drivers::console::read_serial() {
          // Push to global buffer
          crate::drivers::console_input::push_char(byte as char);
-         // Echo received character for debugging
-         crate::drivers::console::write_serial(byte);
     }
     
     // Notify PICS
