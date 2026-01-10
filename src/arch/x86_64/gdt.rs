@@ -95,7 +95,7 @@ const EXECUTABLE: u64 = 1 << 43;
 const LONG_MODE: u64 = 1 << 53;
 const WRITABLE: u64 = 1 << 41; // For Data
 const READABLE: u64 = 1 << 41; // For Code
-const USER: u64 = 1 << 45; // DPL 3
+const USER: u64 = 3 << 45; // DPL 3 (Bits 45 and 46 set)
 
 const KERNEL_CODE_VAL: u64 = COMMON_FLAGS | EXECUTABLE | LONG_MODE | READABLE;
 const KERNEL_DATA_VAL: u64 = COMMON_FLAGS | WRITABLE;

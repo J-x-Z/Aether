@@ -7,5 +7,6 @@ pub mod uefi_input;    // UEFI SimpleTextInput Wrapper
 
 /// Initialize drivers
 pub fn init() {
-    // TODO: Probe and initialize devices
+    // Initialize serial console (enables IRQ for input)
+    console::init();
 }

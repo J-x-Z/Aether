@@ -59,13 +59,15 @@ fn early_serial_print(_s: &[u8]) {}
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    early_serial_print(b"PANIC: ");
+    // FORCE SERIAL OUTPUT ON PANIC
+    let msg = b"\n!!!! KERNEL PANIC !!!!\n";
+    for &b in msg { crate::drivers::console::write_serial(b); }
+    
     if let Some(location) = info.location() {
-        use core::fmt::Write;
-        // We can't easily format to serial without a writer, but we can try simple output
-        // Or just hang.
+        // We can't format easily without alloc, but we can print basic info if possible
+        // For now, just a marker
     }
-    early_serial_print(b"KERNEL PANIC\r\n");
+    
     loop {
         core::hint::spin_loop(); 
     }

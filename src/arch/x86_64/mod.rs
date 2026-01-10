@@ -30,6 +30,7 @@ pub unsafe fn enter_usermode(entry_point: u64, stack_pointer: u64) -> ! {
     
     // IRETQ Stack Frame: SS, RSP, RFLAGS, CS, RIP
     core::arch::asm!(
+        "cli", // Disable interrupts while setting up segments
         "mov ds, {ds:x}",
         "mov es, {ds:x}",
         "mov fs, {ds:x}",

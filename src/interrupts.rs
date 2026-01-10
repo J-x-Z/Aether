@@ -173,6 +173,11 @@ extern "x86-interrupt" fn breakpoint_handler(
 extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame, _error_code: u64) -> !
 {
+    // SERIAL DEBUG: "D" for Double Fault
+    crate::drivers::console::write_serial(b'!');
+    crate::drivers::console::write_serial(b'D');
+    crate::drivers::console::write_serial(b'F');
+    crate::drivers::console::write_serial(b'\n');
     panic!("[EXCEPTION] DOUBLE FAULT\n{:#?}", stack_frame);
 }
 
@@ -181,6 +186,12 @@ extern "x86-interrupt" fn page_fault_handler(
     error_code: x86_64::structures::idt::PageFaultErrorCode,
 ) {
     use x86_64::registers::control::Cr2;
+    // SERIAL DEBUG: "P" for Page Fault
+    crate::drivers::console::write_serial(b'!');
+    crate::drivers::console::write_serial(b'P');
+    crate::drivers::console::write_serial(b'F');
+    crate::drivers::console::write_serial(b'\n');
+    
     log::error!("[EXCEPTION] PAGE FAULT");
     log::error!("Accessed Address: {:?}", Cr2::read());
     log::error!("Error Code: {:?}", error_code);
@@ -191,6 +202,13 @@ extern "x86-interrupt" fn page_fault_handler(
 extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame, error_code: u64)
 {
+    // SERIAL DEBUG: "G" for GPF
+    crate::drivers::console::write_serial(b'!');
+    crate::drivers::console::write_serial(b'G');
+    crate::drivers::console::write_serial(b'P');
+    crate::drivers::console::write_serial(b'F');
+    crate::drivers::console::write_serial(b'\n');
+    
     log::error!("[EXCEPTION] GENERAL PROTECTION FAULT\nError Code: {}\n{:#?}", error_code, stack_frame);
     panic!("GPF");
 }

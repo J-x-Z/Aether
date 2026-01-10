@@ -160,10 +160,19 @@ pub mod numbers {
 
 /// Main syscall dispatcher
 pub fn dispatch(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
+    // Debug: Log syscall number via serial
+    // Only log important syscalls to avoid spam
+    if nr == numbers::SYS_WRITE || nr == numbers::SYS_READ || nr == numbers::SYS_EXIT {
+        // Simple debug: write 'S' + syscall number digit to serial
+        crate::drivers::console::write_serial(b'[');
+        crate::drivers::console::write_serial(b'S');
+        crate::drivers::console::write_serial(b'0' + (nr / 10) as u8);
+        crate::drivers::console::write_serial(b'0' + (nr % 10) as u8);
+        crate::drivers::console::write_serial(b']');
+    }
+    
     // Sanity check: Linux x86_64 has ~450 syscalls, anything much larger is suspicious
-    // This catches spurious/corrupted syscall invocations
     if nr > 500 {
-        log::trace!("[syscall] Ignoring invalid syscall nr={} (possibly spurious)", nr);
         return -38; // ENOSYS
     }
     
@@ -358,14 +367,13 @@ fn sys_read(fd: usize, buf_ptr: usize, count: usize) -> isize {
 }
 
 fn sys_write(fd: usize, buf_ptr: usize, count: usize) -> isize {
-    // Special handling for stdout/stderr (created empty in task)
+    // Special handling for stdout/stderr
     if fd == 1 || fd == 2 {
         unsafe {
             let slice = core::slice::from_raw_parts(buf_ptr as *const u8, count);
-            if let Ok(s) = core::str::from_utf8(slice) {
-                // Use kernel console for now
-                // Since this is bare metal, we use console_println from aether-user or just log
-                log::info!("[STDOUT] {}", s);
+            // Write directly to serial port for QEMU visibility
+            for &byte in slice {
+                crate::drivers::console::write_serial(byte);
             }
         }
         return count as isize;

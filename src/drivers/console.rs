@@ -59,3 +59,14 @@ pub fn is_data_ready() -> bool {
         port_lsr.read() & 1 != 0
     }
 }
+
+/// Write a byte to serial port (for stdout output)
+pub fn write_serial(byte: u8) {
+    unsafe {
+        let mut port_lsr = Port::<u8>::new(COM1 + 5);
+        // Wait for transmit buffer to be empty
+        while port_lsr.read() & 0x20 == 0 {}
+        let mut port_data = Port::<u8>::new(COM1);
+        port_data.write(byte);
+    }
+}
