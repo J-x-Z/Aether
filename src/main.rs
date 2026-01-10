@@ -79,7 +79,7 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     
     // Initialize UEFI Input (for Hyper-V keyboard)
     unsafe {
-        drivers::uefi_input::init_protocol(system_table.std_in() as *mut _);
+        drivers::uefi_input::init_protocol(system_table.stdin() as *mut _);
     }
     screen_print!(system_table, "[BOOT] UEFI Input driver registered");
 
