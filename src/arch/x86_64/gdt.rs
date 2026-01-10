@@ -87,3 +87,13 @@ pub fn user_cs() -> u16 {
 pub fn user_ds() -> u16 {
     GDT.1.user_data_selector.0
 }
+
+/// Update TSS Ring 0 Stack (RSP0)
+/// This is required for context switching.
+/// When checking interrupts from Ring 3, CPU loads stack from here.
+pub unsafe fn set_interrupt_stack(stack_top: u64) {
+    // Force deref of Lazy to get the actual TaskStateSegment
+    let tss = &*TSS as *const TaskStateSegment as *mut TaskStateSegment;
+    log::info!("[GDT] Updating TSS at {:p}, RSP0 = 0x{:x}", tss, stack_top);
+    (*tss).privilege_stack_table[0] = VirtAddr::new(stack_top);
+}

@@ -35,9 +35,26 @@ pub fn init() {
         
         // SFMASK: Flags to clear on syscall (IF, TF, DF)
         wrmsr(MSR_SFMASK, 0x300); // Clear IF and DF
+        
+        // EFER: Enable System Call Extensions (SCE) - Bit 0 (Manual ASM)
+        let msr = 0xC0000080u32;
+        let mut low: u32;
+        let mut high: u32;
+        asm!("rdmsr", in("ecx") msr, out("eax") low, out("edx") high, options(nomem, nostack));
+        low |= 1; 
+        asm!("wrmsr", in("ecx") msr, in("eax") low, in("edx") high, options(nomem, nostack));
+        
+        // CR4.TSD (Time Stamp Disable) - Bit 2
+        // Clear it to allow rdtsc in userspace (common cause of #GP(0))
+        let mut cr4: u64;
+        asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack));
+        if (cr4 & 4) != 0 {
+            cr4 &= !4;
+            asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack));
+        }
     }
     
-    log::info!("[Syscall] x86_64 SYSCALL/SYSRET initialized");
+    log::info!("[Syscall] x86_64 SYSCALL/SYSRET initialized (Asm EFER.SCE + CR4.TSD-OFF)");
 }
 
 /// Write to Model Specific Register

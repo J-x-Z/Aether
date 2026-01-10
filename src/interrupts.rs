@@ -28,22 +28,42 @@ impl InterruptIndex {
     }
 }
 
-lazy_static! {
-    static ref IDT: InterruptDescriptorTable = {
-        let mut idt = InterruptDescriptorTable::new();
-        idt.breakpoint.set_handler_fn(breakpoint_handler);
-        idt.double_fault.set_handler_fn(double_fault_handler);
-        idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
+use spin::Once;
+
+static IDT: Once<InterruptDescriptorTable> = Once::new();
+
+fn create_idt() -> InterruptDescriptorTable {
+    use x86_64::instructions::segmentation::{CS, Segment};
+    let current_cs = CS::get_reg();
+    info!("[Interrupts] Creating IDT with CS: {:?} (Expected: 0x8)", current_cs);
+    
+    let mut idt = InterruptDescriptorTable::new();
+    idt.breakpoint.set_handler_fn(breakpoint_handler);
+    unsafe {
+        idt.double_fault.set_handler_fn(double_fault_handler)
+            // Use a dedicated stack for Double Faults to prevent Triple Faults
+            .set_stack_index(crate::arch::x86_64::gdt::DOUBLE_FAULT_IST_INDEX);
+    }
+    idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
+    idt.page_fault.set_handler_fn(page_fault_handler);
+    idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
+    idt.stack_segment_fault.set_handler_fn(stack_segment_fault_handler);
+    idt.segment_not_present.set_handler_fn(segment_not_present_handler);
+    
+    // Timer Interrupt
+    idt[InterruptIndex::Timer.as_usize()]
+        .set_handler_fn(timer_interrupt_handler);
+    idt[InterruptIndex::Keyboard.as_usize()]
+        .set_handler_fn(keyboard_interrupt_handler);
         
-        // Timer Interrupt
-        idt[InterruptIndex::Timer.as_usize()]
-            .set_handler_fn(timer_interrupt_handler);
-        idt[InterruptIndex::Keyboard.as_usize()]
-            .set_handler_fn(keyboard_interrupt_handler);
-            
-        idt
-    };
+    idt
 }
+
+// ... init_pit ...
+
+// ...
+
+
 
 // PIT defaults to 18.2Hz if untouched, but we want faster checks for UI.
 // Let's set it to ~100Hz.
@@ -62,12 +82,31 @@ pub fn init_pit() {
     }
 }
 
+use x86_64::instructions::segmentation::{CS, Segment};
+use x86_64::structures::gdt::SegmentSelector;
+
 pub fn init_idt() {
     info!("[Aether::Interrupts] Initializing IDT...");
-    IDT.load();
+    
+    // CRITICAL FIX: Force CS to 0x08 (Index 1, Ring 0) before loading IDT.
+    // The x86_64 crate's set_handler_fn() captures the CURRENT CS.
+    // We do this immediately before creating the IDT table entries.
+    unsafe { 
+        CS::set_reg(SegmentSelector(0x08)); 
+    }
+    
+    // Now create and initialize the IDT. This will run create_idt() 
+    // which calls set_handler_fn(), capturing the CS we just set (0x08).
+    let idt = IDT.call_once(create_idt);
+    idt.load();
+    
     unsafe { PICS.lock().initialize() };
     init_pit();
-    // Enable interrupts in Main, not here, to avoid premature ticks.
+    
+    // NOW it's safe: Our GDT is loaded, our IDT is loaded with correct CS, PICs are configured.
+    // Re-enable interrupts.
+    unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+    info!("[Aether::Interrupts] IDT ready, interrupts enabled.");
 }
 
 extern "x86-interrupt" fn breakpoint_handler(
@@ -82,11 +121,44 @@ extern "x86-interrupt" fn double_fault_handler(
     panic!("[EXCEPTION] DOUBLE FAULT\n{:#?}", stack_frame);
 }
 
+extern "x86-interrupt" fn page_fault_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: x86_64::structures::idt::PageFaultErrorCode,
+) {
+    use x86_64::registers::control::Cr2;
+    log::error!("[EXCEPTION] PAGE FAULT");
+    log::error!("Accessed Address: {:?}", Cr2::read());
+    log::error!("Error Code: {:?}", error_code);
+    log::error!("{:#?}", stack_frame);
+    panic!("Page Fault");
+}
+
 extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame, error_code: u64)
 {
-    error!("[EXCEPTION] GENERAL PROTECTION FAULT\nError Code: {}\n{:#?}", error_code, stack_frame);
+    log::error!("[EXCEPTION] GENERAL PROTECTION FAULT\nError Code: {}\n{:#?}", error_code, stack_frame);
     panic!("GPF");
+}
+
+extern "x86-interrupt" fn invalid_opcode_handler(
+    stack_frame: InterruptStackFrame) 
+{
+    log::error!("[EXCEPTION] INVALID OPCODE\n{:#?}", stack_frame);
+    panic!("Invalid Opcode");
+}
+
+extern "x86-interrupt" fn stack_segment_fault_handler(
+    stack_frame: InterruptStackFrame, error_code: u64) 
+{
+    log::error!("[EXCEPTION] STACK FAULT\nError: {}\n{:#?}", error_code, stack_frame);
+    panic!("Stack Fault");
+}
+
+extern "x86-interrupt" fn segment_not_present_handler(
+    stack_frame: InterruptStackFrame, error_code: u64)
+{
+    log::error!("[EXCEPTION] SEGMENT NOT PRESENT\nError: {}\n{:#?}", error_code, stack_frame);
+    panic!("Segment Not Present");
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(
@@ -131,8 +203,6 @@ extern "x86-interrupt" fn timer_interrupt_handler(
             let prev_pid = sched.current_pid;
             
             // Check if we need to switch
-            // Ensure we don't switch if we are in the middle of crucial kernel things?
-            // "schedule()" handles the decision.
             if let Some(next_pid) = sched.schedule() {
                 
                 // 1. Resolve Old Stack Pointer location
@@ -148,11 +218,21 @@ extern "x86-interrupt" fn timer_interrupt_handler(
                     None => unsafe { &mut crate::globals::IDLE_STACK_POINTER as *mut usize }
                 };
                 
-                // 2. Resolve New Stack Pointer
-                // Unwrap is safe because schedule() returned valid PID
-                let new_sp = sched.get_process_mut(next_pid).unwrap().stack_pointer;
+                // 2. Resolve New Stack Pointer & Kernel Stack Top
+                // We know next_pid is valid because schedule returned it
+                let proc = sched.get_process_mut(next_pid).unwrap();
+                let new_sp = proc.stack_pointer;
                 
-                log::trace!("[Timer] Switching {:?} -> {}", prev_pid, next_pid);
+                // Calculate Kernel Stack Top (High Address) for TSS
+                // This ensures interrupts from Ring 3 use this process's kernel stack
+                let kernel_stack_top = proc.stack.as_ptr() as u64 + proc.stack.len() as u64;
+
+                // log::trace!("[Timer] Switching {:?} -> {} (TSS.RSP0={:x})", prev_pid, next_pid, kernel_stack_top);
+
+                // UPDATE TSS RSP0!
+                unsafe {
+                    crate::arch::x86_64::gdt::set_interrupt_stack(kernel_stack_top);
+                }
 
                 // Release lock before switch!
                 drop(sched_lock);
@@ -165,7 +245,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(
         }
     }
 
-    // Safety: we must notify EOI or system hangs
+    // Safety: we must notify EOI
     unsafe {
         PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     }

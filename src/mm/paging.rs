@@ -6,10 +6,10 @@
 mod x86_64_paging {
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     
-    /// Frame allocator starting at 1MB (guaranteed identity-mapped by UEFI)
-    /// We reserve 1MB-2MB for page tables, 2MB+ for user allocations
-    static PT_ALLOCATOR: AtomicU64 = AtomicU64::new(0x100000); // 1MB - for page tables
-    static FRAME_ALLOCATOR: AtomicU64 = AtomicU64::new(0x200000); // 2MB - for user pages
+    /// Frame allocator - MOVED to 64MB to avoid overwriting Kernel Code/Data which is around 1MB!
+    /// We reserve 64MB-65MB for page tables, 65MB+ for user allocations
+    static PT_ALLOCATOR: AtomicU64 = AtomicU64::new(0x4000000); // 64MB - for page tables
+    static FRAME_ALLOCATOR: AtomicU64 = AtomicU64::new(0x4100000); // 65MB - for user pages
     
     static OUR_PML4: AtomicU64 = AtomicU64::new(0);
     static INITIALIZED: AtomicBool = AtomicBool::new(false);

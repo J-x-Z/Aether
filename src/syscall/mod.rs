@@ -56,9 +56,6 @@ pub mod numbers {
 
 /// Main syscall dispatcher
 pub fn dispatch(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
-    // Log all syscalls for debugging
-    log::trace!("[syscall] nr={} arg0=0x{:x} arg1=0x{:x} arg2=0x{:x}", nr, arg0, arg1, arg2);
-    
     match nr {
         // Core I/O
         numbers::SYS_READ => sys_read(arg0, arg1, arg2),
@@ -167,16 +164,14 @@ fn sys_read(fd: usize, buf_ptr: usize, count: usize) -> isize {
 }
 
 fn sys_write(fd: usize, buf_ptr: usize, count: usize) -> isize {
-    // Special handling for stdout/stderr
+    // Special handling for stdout/stderr (created empty in task)
     if fd == 1 || fd == 2 {
         unsafe {
             let slice = core::slice::from_raw_parts(buf_ptr as *const u8, count);
-            // Print each character via log
             if let Ok(s) = core::str::from_utf8(slice) {
-                // Use print! style - each line separately
-                for line in s.lines() {
-                    log::info!("{}", line);
-                }
+                // Use kernel console for now
+                // Since this is bare metal, we use console_println from aether-user or just log
+                log::info!("[STDOUT] {}", s);
             }
         }
         return count as isize;

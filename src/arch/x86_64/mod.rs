@@ -7,6 +7,13 @@ pub mod syscall;
 
 /// Initialize x86_64 architecture
 pub fn init() {
+    // CRITICAL: Disable ALL interrupts before touching GDT.
+    // UEFI has its own IDT and timer running. If an interrupt fires
+    // after we load our GDT but before our IDT is ready, the CPU will
+    // use UEFI's IDT entries which reference UEFI's old GDT selectors
+    // (like CS=0x38) that no longer exist in our GDT -> GPF -> Triple Fault.
+    unsafe { core::arch::asm!("cli", options(nomem, nostack)); }
+    
     gdt::init();
     // interrupts::init_idt(); // Moved to main.rs for now or here
     syscall::init();

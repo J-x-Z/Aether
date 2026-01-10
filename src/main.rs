@@ -96,6 +96,16 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                     log::info!("[Kernel] Entering BusyBox shell (Ring 3)...");
                     log::info!("[Kernel]   Entry: 0x{:x}, Stack: 0x{:x}", loaded.entry_point, user_sp);
                     
+                    // CRITICAL: Allocate Kernel Stack for this process (PID 1) and update TSS!
+                    // Otherwise interrupts/syscalls from Ring 3 will crash (Double Fault) due to RSP0=0.
+                    let mut kernel_stack = alloc::vec![0u8; 128 * 1024]; // 128KB
+                    let kernel_stack_top = (kernel_stack.as_ptr() as u64 + kernel_stack.len() as u64) & !0xF;
+                    unsafe {
+                        crate::arch::x86_64::gdt::set_interrupt_stack(kernel_stack_top);
+                    }
+                    // Prevent deallocation of stack
+                    core::mem::forget(kernel_stack);
+
                     // Jump to Ring 3
                     unsafe {
                         arch::enter_usermode(loaded.entry_point, user_sp);
