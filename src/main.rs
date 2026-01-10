@@ -210,34 +210,32 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     
     // 7. Load Init Process
     let init_path = if USE_SIMPLE_INIT { "/init" } else { "/bin/busybox" };
-    log::info!("[Kernel] Loading {}...", init_path);
-    // system_table.boot_services().stall(1_000_000); // STALL
+    screen_print!(system_table, "[Kernel] Loading init...");
 
-    log::info!("[Kernel] DEBUG: About to call fs::open");
-    // system_table.boot_services().stall(1_000_000); // STALL
+    screen_print!(system_table, "[Kernel] DEBUG: About to call fs::open");
 
     if let Ok(inode) = fs::open(init_path, 0) {
-        log::info!("[Kernel] DEBUG: fs::open succeeded");
+        screen_print!(system_table, "[Kernel] DEBUG: fs::open succeeded");
         
         // Allocate buffer for binary (2MB max)
-        log::info!("[Kernel] DEBUG: Allocating 2MB buffer...");
+        screen_print!(system_table, "[Kernel] DEBUG: Allocating 2MB buffer...");
         let mut buffer = alloc::vec![0u8; 2 * 1024 * 1024];
-        log::info!("[Kernel] DEBUG: Buffer allocated, reading file...");
+        screen_print!(system_table, "[Kernel] DEBUG: Buffer allocated, reading...");
         let len = inode.read_at(0, &mut buffer);
-        log::info!("[Kernel] Read {}: {} bytes", init_path, len);
+        screen_print!(system_table, "[Kernel] DEBUG: Read bytes");
         
         system_table.boot_services().stall(1_000_000); // STALL 1s
 
         if len > 64 {
             use crate::syscall::elf::{load_elf, setup_user_stack, AuxvEntry, AT_PAGESZ};
             
-            log::info!("[Kernel] DEBUG: About to load ELF...");
+            screen_print!(system_table, "[Kernel] DEBUG: About to load ELF...");
             system_table.boot_services().stall(3_000_000); // STALL 3s
 
             // Load ELF (static binary, base = 0)
             match load_elf(&buffer[..len], 0) {
                 Ok(loaded) => {
-                    log::info!("[Kernel] BusyBox loaded, entry: 0x{:x}", loaded.entry_point);
+                    screen_print!(system_table, "[Kernel] BusyBox loaded!");
                     system_table.boot_services().stall(3_000_000); // STALL 3s
                     
                     // Set up Auxv
