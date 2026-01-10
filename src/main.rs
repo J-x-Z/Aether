@@ -62,7 +62,7 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     drivers::init();
     
     // For testing: set to true to use simple init.bin instead of BusyBox
-    const USE_SIMPLE_INIT: bool = true;
+    const USE_SIMPLE_INIT: bool = false;
     
     // 7. Load Init Process
     let init_path = if USE_SIMPLE_INIT { "/init" } else { "/bin/busybox" };

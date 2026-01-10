@@ -52,10 +52,25 @@ pub mod numbers {
     pub const SYS_GETGID: usize = 104;
     pub const SYS_GETEUID: usize = 107;
     pub const SYS_GETEGID: usize = 108;
+    
+    // Musl-required syscalls (critical for startup)
+    pub const SYS_MPROTECT: usize = 10;
+    pub const SYS_RT_SIGACTION: usize = 13;
+    pub const SYS_RT_SIGPROCMASK: usize = 14;
+    pub const SYS_ARCH_PRCTL: usize = 158;
+    pub const SYS_SET_TID_ADDRESS: usize = 218;
+    pub const SYS_EXIT_GROUP: usize = 231;
 }
 
 /// Main syscall dispatcher
 pub fn dispatch(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
+    // Sanity check: Linux x86_64 has ~450 syscalls, anything much larger is suspicious
+    // This catches spurious/corrupted syscall invocations
+    if nr > 500 {
+        log::trace!("[syscall] Ignoring invalid syscall nr={} (possibly spurious)", nr);
+        return -38; // ENOSYS
+    }
+    
     match nr {
         // Core I/O
         numbers::SYS_READ => sys_read(arg0, arg1, arg2),
@@ -96,6 +111,47 @@ pub fn dispatch(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
         numbers::SYS_GETGID => sys_getgid(),
         numbers::SYS_GETEUID => sys_geteuid(),
         numbers::SYS_GETEGID => sys_getegid(),
+        
+        // Musl-required syscalls (stubs for BusyBox startup)
+        numbers::SYS_MPROTECT => {
+            // mprotect(addr, len, prot) - pretend it always succeeds
+            0
+        }
+        numbers::SYS_RT_SIGACTION => {
+            // rt_sigaction(signum, act, oldact, sigsetsize) - pretend it succeeds
+            0
+        }
+        numbers::SYS_RT_SIGPROCMASK => {
+            // rt_sigprocmask(how, set, oldset, sigsetsize) - pretend it succeeds
+            0
+        }
+        numbers::SYS_ARCH_PRCTL => {
+            // arch_prctl(code, addr) - for setting FS/GS base
+            // ARCH_SET_FS = 0x1002, ARCH_SET_GS = 0x1001
+            let code = arg0;
+            let addr = arg1;
+            if code == 0x1002 {
+                // Set FS base - musl uses this for TLS
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    use x86_64::registers::model_specific::FsBase;
+                    FsBase::write(x86_64::VirtAddr::new(addr as u64));
+                }
+                0
+            } else {
+                log::debug!("[syscall] arch_prctl code=0x{:x} addr=0x{:x}", code, addr);
+                0  // Pretend success for other codes too
+            }
+        }
+        numbers::SYS_SET_TID_ADDRESS => {
+            // set_tid_address(tidptr) - return current TID
+            // We return PID as TID for single-threaded process
+            sys_getpid()
+        }
+        numbers::SYS_EXIT_GROUP => {
+            // exit_group(status) - exit all threads
+            sys_exit(arg0)
+        }
         
         _ => {
             log::warn!("[syscall] Unimplemented syscall: {}", nr);

@@ -84,7 +84,8 @@ unsafe fn wrmsr(msr: u32, value: u64) {
 pub unsafe extern "C" fn syscall_entry() {
     core::arch::naked_asm!(
         // ============================================================
-        // SIMPLIFIED: Direct register shuffling, minimal stack use
+        // CRITICAL: Must preserve RCX (user RIP) and R11 (user RFLAGS)
+        // for sysretq to return correctly to userspace
         // ============================================================
         
         // Step 1: Save user RSP to r15, switch to kernel stack
@@ -92,60 +93,47 @@ pub unsafe extern "C" fn syscall_entry() {
         "lea rsp, [{kernel_rsp}]",
         "mov rsp, [rsp]",
         
-        // Step 2: Save only what we need for sysret (on kernel stack)
+        // Step 2: Save user state that sysretq needs
         "push r15",                         // User RSP
-        "push rcx",                         // User RIP (for sysret)
-        "push r11",                         // User RFLAGS (for sysret)
+        "push rcx",                         // User RIP (CRITICAL - for sysretq)
+        "push r11",                         // User RFLAGS (CRITICAL - for sysretq)
         
-        // Step 3: Save syscall args to stack (we'll clobber these regs)
-        // Syscall convention: RAX=nr, RDI=a0, RSI=a1, RDX=a2, R10=a3, R8=a4, R9=a5
-        // We need to map to C calling convention for syscall_dispatch(nr, a0, a1, a2, ...)
-        // C convention: RDI=arg0, RSI=arg1, RDX=arg2, RCX=arg3, R8=arg4, R9=arg5
+        // Step 3: Save syscall args to callee-saved registers
+        // (so they survive the function call)
+        "mov r15, rax",                     // r15 = syscall number
+        "mov r14, rdi",                     // r14 = a0
+        "mov r13, rsi",                     // r13 = a1
+        "mov r12, rdx",                     // r12 = a2 (save before it becomes arg2)
+        // r10, r8, r9 will become arg3-5, no need to save
         
-        // Save original values we need to shuffle
-        "mov r14, rax",                     // r14 = syscall number
-        "mov r13, rdi",                     // r13 = a0 (original rdi)
-        "mov r12, rsi",                     // r12 = a1 (original rsi)
-        // rdx stays as a2 -> will become arg2, but we need it for arg1
-        // r10 = a3, r8 = a4, r9 = a5
+        // Step 4: Set up C calling convention
+        // syscall_dispatch(nr, a0, a1, a2, a3, a4, a5)
+        // C: RDI, RSI, RDX, RCX, R8, R9
+        "mov rdi, r15",                     // RDI = syscall number
+        "mov rsi, r14",                     // RSI = a0
+        "mov rdx, r13",                     // RDX = a1
+        "mov rcx, r12",                     // RCX = a2
+        "mov r8, r10",                      // R8 = a3 (syscall a3 is in r10)
+        // R9 = a4 stays in r8? No, syscall a4 is already in r8
+        // Actually: syscall uses r8=a4, r9=a5
+        // So we need: C_r8 = syscall_a3 (r10), C_r9 = syscall_a4 (r8)
+        // But r8 already has syscall_a4, and we need r8 for C_a3
+        // This is tricky... let's save r8 first
+        "xchg r8, r10",                     // Now r8=a3, r10=a4
+        "mov r9, r10",                      // R9 = a4
         
-        // Now rearrange for C calling convention:
-        // syscall_dispatch(nr, a0, a1, a2) - we only pass 4 args
-        "mov rdi, r14",                     // RDI = syscall number (was RAX)
-        "mov rsi, r13",                     // RSI = a0 (was RDI)
-        "mov rcx, rdx",                     // Save RDX before clobbering
-        "mov rdx, r12",                     // RDX = a1 (was RSI)
-        // RCX = a2 (was RDX, saved in rcx now) - wait this is wrong
-        // Let me redo this more carefully
-        
-        // Actually: shuffle in correct order
-        // We have: RDI=a0, RSI=a1, RDX=a2, and we need: RDI=nr, RSI=a0, RDX=a1, RCX=a2
-        // Using r14=nr, r13=a0, r12=a1, rdx=a2
-        // "mov rdi, r14" - correct
-        // "mov rsi, r13" - correct  
-        // "mov rcx, rdx" - this saves a2 to rcx (correct!)
-        // "mov rdx, r12" - this sets rdx = a1 (correct!)
-        // So the order above is actually fine if we save rdx BEFORE overwriting it
-        
-        // Let me redo completely to be safe:
-        "mov rdi, r14",                     // RDI = nr
-        "mov rsi, r13",                     // RSI = a0
-        // Before setting RDX, save its current value (a2) to RCX
-        "mov rcx, rdx",                     // RCX = a2 (original RDX)
-        "mov rdx, r12",                     // RDX = a1 (saved from RSI)
-        // R8 and R9 stay as a4 and a5 if needed
-        
-        // Call the Rust dispatcher
+        // Step 5: Call the Rust dispatcher
         "call syscall_dispatch",
         
         // RAX = return value
         
-        // Restore user state
+        // Step 6: Restore user state for sysretq
+        // sysretq uses: RCX=user RIP, R11=user RFLAGS
         "pop r11",                          // User RFLAGS
         "pop rcx",                          // User RIP
         "pop rsp",                          // User RSP
         
-        // Return to userspace
+        // Step 7: Return to userspace
         "sysretq",
         
         kernel_rsp = sym KERNEL_RSP0,
