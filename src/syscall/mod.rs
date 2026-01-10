@@ -306,6 +306,11 @@ fn sys_open(filename: usize, flags: usize, _mode: usize) -> isize {
 }
 
 fn sys_read(fd: usize, buf_ptr: usize, count: usize) -> isize {
+    // Poll UEFI input (Hack for Hyper-V)
+    if fd == 0 {
+        crate::drivers::uefi_input::poll();
+    }
+
     // Hardcoded STDIN for now (Keyboard)
     if fd == 0 {
         if count == 0 { return 0; }
