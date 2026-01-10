@@ -171,8 +171,8 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // 3. Initialize Memory Management
     early_serial_print(b"[BOOT] Initializing MM...\r\n");
     screen_print!(system_table, "[Kernel] Initializing Memory Management...");
-    // STALL 2s
-    system_table.boot_services().stall(2_000_000);
+    // STALL 0.5s
+    system_table.boot_services().stall(500_000);
 
     let (phys_offset, memory_map_iter) = mm::init(&system_table);
     screen_print!(system_table, "[Kernel] Memory Management initialized");
@@ -181,8 +181,8 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     early_serial_print(b"[BOOT] Initializing FS...\r\n");
     screen_print!(system_table, "[Kernel] Initializing Filesystem...");
     fs::init(phys_offset);
-    // STALL 2s
-    system_table.boot_services().stall(2_000_000);
+    // STALL 0.5s
+    system_table.boot_services().stall(500_000);
     
     // 5. Initialize Scheduler
     screen_print!(system_table, "[Kernel] Initializing Scheduler...");
@@ -191,15 +191,19 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // 6. Initialize Drivers
     screen_print!(system_table, "[Kernel] Initializing Drivers...");
     drivers::init();
-    system_table.boot_services().stall(1_000_000); // STALL 1s
+    system_table.boot_services().stall(500_000); // STALL 0.5s
 
-    // 7. Enable Interrupts (NOW it's safe)
+    // 7. Enable Interrupts (SKIPPED FOR DEBUGGING)
+    screen_print!(system_table, "[Kernel] SKIPPING Interrupts (Avoid Crash)...");
+    /*
     #[cfg(target_arch = "x86_64")]
     {
         interrupts::enable();
         log::info!("[Kernel] Interrupts ENABLED");
+        // early_serial_print(b"[BOOT] Interrupts ENABLED\r\n");
     }
-    system_table.boot_services().stall(3_000_000); // STALL 3s
+    */
+    system_table.boot_services().stall(1_000_000); // STALL 1s
     
     // For testing: set to true to use simple init.bin instead of BusyBox
     const USE_SIMPLE_INIT: bool = false;
