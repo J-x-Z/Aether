@@ -76,90 +76,78 @@ unsafe fn wrmsr(msr: u32, value: u64) {
 /// At entry (from CPU):
 ///   RCX = user RIP (saved by CPU for sysret)
 ///   R11 = user RFLAGS (saved by CPU for sysret)
-///   RSP = user stack (DANGER: we're in Ring 0 but on user stack!)
+///   RSP = user stack
 ///   RAX = syscall number
-///   RDI, RSI, RDX, R10, R8, R9 = syscall arguments
-///
-/// This function:
-///   1. swapgs to get kernel GS base
-///   2. Switch to kernel stack (from GS-based per-CPU storage)
-///   3. Save user registers
-///   4. Call Rust syscall dispatcher
-///   5. Restore user registers
-///   6. Switch back to user stack
-///   7. swapgs back
-///   8. sysretq
+///   RDI = arg0, RSI = arg1, RDX = arg2, R10 = arg3, R8 = arg4, R9 = arg5
 #[unsafe(naked)]
 #[no_mangle]
 pub unsafe extern "C" fn syscall_entry() {
     core::arch::naked_asm!(
         // ============================================================
-        // ENTRY: We're in Ring 0 but on USER STACK - be very careful!
+        // SIMPLIFIED: Direct register shuffling, minimal stack use
         // ============================================================
         
-        // Step 1: Swap GS (now GS points to kernel per-CPU data)
-        "swapgs",
+        // Step 1: Save user RSP to r15, switch to kernel stack
+        "mov r15, rsp",
+        "lea rsp, [{kernel_rsp}]",
+        "mov rsp, [rsp]",
         
-        // Step 2: Save user RSP to kernel per-CPU scratch, load kernel RSP
-        // We use a global variable since we don't have proper per-CPU yet
-        // KERNEL_SCRATCH_RSP is set before entering usermode
-        "mov gs:[{scratch_rsp}], rsp",      // Save user RSP to scratch
-        "mov rsp, gs:[{kernel_rsp}]",       // Load kernel RSP
+        // Step 2: Save only what we need for sysret (on kernel stack)
+        "push r15",                         // User RSP
+        "push rcx",                         // User RIP (for sysret)
+        "push r11",                         // User RFLAGS (for sysret)
         
-        // Step 3: Now we're on kernel stack - safe to push
-        // Save user registers that we need to preserve
-        "push rcx",                         // User RIP
-        "push r11",                         // User RFLAGS
-        "push gs:[{scratch_rsp}]",          // User RSP (from scratch)
+        // Step 3: Save syscall args to stack (we'll clobber these regs)
+        // Syscall convention: RAX=nr, RDI=a0, RSI=a1, RDX=a2, R10=a3, R8=a4, R9=a5
+        // We need to map to C calling convention for syscall_dispatch(nr, a0, a1, a2, ...)
+        // C convention: RDI=arg0, RSI=arg1, RDX=arg2, RCX=arg3, R8=arg4, R9=arg5
         
-        // Save all callee-saved registers
-        "push rbx",
-        "push rbp",
-        "push r12",
-        "push r13",
-        "push r14",
-        "push r15",
+        // Save original values we need to shuffle
+        "mov r14, rax",                     // r14 = syscall number
+        "mov r13, rdi",                     // r13 = a0 (original rdi)
+        "mov r12, rsi",                     // r12 = a1 (original rsi)
+        // rdx stays as a2 -> will become arg2, but we need it for arg1
+        // r10 = a3, r8 = a4, r9 = a5
         
-        // Step 4: Set up arguments for syscall_dispatch
-        // RAX = syscall number (already there)
-        // RDI = arg0 (already there)  
-        // RSI = arg1 (already there)
-        // RDX = arg2 (already there)
-        // RCX = arg3 (need to move from R10)
-        // R8 = arg4 (already there)
-        // R9 = arg5 (already there)
-        "mov rcx, r10",
+        // Now rearrange for C calling convention:
+        // syscall_dispatch(nr, a0, a1, a2) - we only pass 4 args
+        "mov rdi, r14",                     // RDI = syscall number (was RAX)
+        "mov rsi, r13",                     // RSI = a0 (was RDI)
+        "mov rcx, rdx",                     // Save RDX before clobbering
+        "mov rdx, r12",                     // RDX = a1 (was RSI)
+        // RCX = a2 (was RDX, saved in rcx now) - wait this is wrong
+        // Let me redo this more carefully
+        
+        // Actually: shuffle in correct order
+        // We have: RDI=a0, RSI=a1, RDX=a2, and we need: RDI=nr, RSI=a0, RDX=a1, RCX=a2
+        // Using r14=nr, r13=a0, r12=a1, rdx=a2
+        // "mov rdi, r14" - correct
+        // "mov rsi, r13" - correct  
+        // "mov rcx, rdx" - this saves a2 to rcx (correct!)
+        // "mov rdx, r12" - this sets rdx = a1 (correct!)
+        // So the order above is actually fine if we save rdx BEFORE overwriting it
+        
+        // Let me redo completely to be safe:
+        "mov rdi, r14",                     // RDI = nr
+        "mov rsi, r13",                     // RSI = a0
+        // Before setting RDX, save its current value (a2) to RCX
+        "mov rcx, rdx",                     // RCX = a2 (original RDX)
+        "mov rdx, r12",                     // RDX = a1 (saved from RSI)
+        // R8 and R9 stay as a4 and a5 if needed
         
         // Call the Rust dispatcher
         "call syscall_dispatch",
         
-        // RAX now contains return value
+        // RAX = return value
         
-        // Step 5: Restore callee-saved registers
-        "pop r15",
-        "pop r14",
-        "pop r13",
-        "pop r12",
-        "pop rbp",
-        "pop rbx",
-        
-        // Step 6: Restore user RSP, RIP, RFLAGS
-        "pop gs:[{scratch_rsp}]",           // User RSP to scratch
+        // Restore user state
         "pop r11",                          // User RFLAGS
         "pop rcx",                          // User RIP
+        "pop rsp",                          // User RSP
         
-        // Switch back to user stack
-        "mov rsp, gs:[{scratch_rsp}]",
-        
-        // Step 7: Swap GS back to user GS
-        "swapgs",
-        
-        // Step 8: Return to userspace
-        // sysretq loads RIP from RCX, RFLAGS from R11
+        // Return to userspace
         "sysretq",
         
-        // Symbol references
-        scratch_rsp = sym SCRATCH_USER_RSP,
         kernel_rsp = sym KERNEL_RSP0,
     );
 }
@@ -199,5 +187,6 @@ pub extern "C" fn syscall_dispatch(
     arg4: usize,
     _arg5: usize,
 ) -> isize {
+    log::debug!("[Syscall] nr={} a0=0x{:x} a1=0x{:x} a2=0x{:x}", nr, arg0, arg1, arg2);
     crate::syscall::dispatch(nr, arg0, arg1, arg2)
 }
