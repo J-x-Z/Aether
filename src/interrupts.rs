@@ -44,9 +44,11 @@ fn create_idt() -> InterruptDescriptorTable {
     
     let mut idt = InterruptDescriptorTable::new();
     
-    // 1. Set default handler for ALL 256 entries to catch stray interrupts
+    // 1. Set default handler for INT 32-255 to catch stray interrupts
     // UEFI/Hardware might fire APIC/MSI interrupts we didn't expect (e.g. Vector 0x6E)
-    for i in 0..256 {
+    // CRITICAL: Start from 32! Vectors 0-31 are Exceptions.
+    // Index 8 (Double Fault) requires an error code, so setting a generic handler panics.
+    for i in 32..256 {
         idt[i].set_handler_fn(default_interrupt_handler);
     }
 
