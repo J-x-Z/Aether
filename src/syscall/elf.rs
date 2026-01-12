@@ -183,6 +183,9 @@ pub fn load_elf(data: &[u8], base_addr: u64) -> Result<LoadedElf, &'static str> 
     }
     
     log::info!("[ELF] LOAD COMPLETE");
+    // Debug: Output segment count to screen
+    crate::video::console_print_char(b'L');
+    crate::video::console_print_char(b'0' + segments.len() as u8);
     stall(100);
 
     Ok(LoadedElf {
@@ -312,6 +315,13 @@ pub fn setup_user_stack(
     // Push argc
     sp -= 8;
     unsafe { *(sp as *mut u64) = argv.len() as u64; }
+    
+    // Verify alignment
+    if sp & 0xF == 0 {
+        crate::video::console_print_char(b'A');
+    } else {
+        crate::video::console_print_char(b'U');
+    }
     
     sp
 }

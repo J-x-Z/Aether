@@ -2,12 +2,22 @@
 
 **Aether** is a hybrid kernel designed for bare-metal execution with POSIX and glibc compatibility.
 
-## 🎉 Current Milestone: BusyBox Shell
+## Project Status
+- **Architecture**: Hybrid Kernel (x86_64 UEFI).
+- **Memory Management**: 
+  - Physical Memory Manager (Bitmap)
+  - Virtual Memory Manager (Offset Mapping, Per-Process Page Tables)
+  - **Issue**: Investigating Identity Mapping for High-Memory Kernels (>4GB).
+- **Multitasking**: 
+  - Cooperative Scheduler with Round-Robin prevention (Timer Interrupts).
+  - Basic `fork` and `execve` implemented.
+- **Filesystem**: `RamFS` (Read-only initial implementation).
+- **Userspace**: Loading ELF binaries (`init`, `sh`).
 
-Aether now boots directly into a **BusyBox shell** (static musl build), making it a functional POSIX-compatible operating system!
-
-### Features Implemented
-
+## Building and Running
+```bash
+./run-qemu-x86.sh
+```
 - ✅ **30+ POSIX Syscalls** - read, write, open, close, fork, execve, mmap, brk, etc.
 - ✅ **ELF Loader** - Full ELF64 parser with PT_LOAD segment handling
 - ✅ **Dynamic Linker Support** - PT_INTERP detection, Auxiliary Vector (Auxv) setup

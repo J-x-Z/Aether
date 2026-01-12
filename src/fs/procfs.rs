@@ -176,7 +176,7 @@ impl Inode for ProcSelfDir {
         Metadata { size: 0, mode: FileMode(0o555), file_type: FileType::Directory }
     }
     
-    fn poll(&self) -> Result<Vec<(String, u64)>, FsError> {
+    fn read_dir(&self) -> Result<Vec<(String, u64)>, FsError> {
         Ok(alloc::vec![
             (String::from("stat"), 1),
             (String::from("maps"), 2),
@@ -206,7 +206,7 @@ impl Inode for ProcFsRoot {
         Metadata { size: 0, mode: FileMode(0o555), file_type: FileType::Directory }
     }
     
-    fn poll(&self) -> Result<Vec<(String, u64)>, FsError> {
+    fn read_dir(&self) -> Result<Vec<(String, u64)>, FsError> {
         let mut entries = alloc::vec![
             (String::from("self"), 0),
             (String::from("meminfo"), 1),
@@ -259,7 +259,7 @@ impl Inode for ProcPidDir {
         Metadata { size: 0, mode: FileMode(0o555), file_type: FileType::Directory }
     }
     
-    fn poll(&self) -> Result<Vec<(String, u64)>, FsError> {
+    fn read_dir(&self) -> Result<Vec<(String, u64)>, FsError> {
         Ok(alloc::vec![
             (String::from("stat"), 1),
             (String::from("maps"), 2),

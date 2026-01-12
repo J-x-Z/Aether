@@ -57,9 +57,13 @@ fn create_idt() -> InterruptDescriptorTable {
         idt.double_fault.set_handler_fn(double_fault_handler)
             // Use a dedicated stack for Double Faults to prevent Triple Faults
             .set_stack_index(crate::arch::x86_64::gdt::DOUBLE_FAULT_IST_INDEX);
+        
+        // Also use IST for Page Fault and GPF to bypass RSP0 issues
+        idt.page_fault.set_handler_fn(page_fault_handler)
+            .set_stack_index(crate::arch::x86_64::gdt::DOUBLE_FAULT_IST_INDEX);
+        idt.general_protection_fault.set_handler_fn(general_protection_fault_handler)
+            .set_stack_index(crate::arch::x86_64::gdt::DOUBLE_FAULT_IST_INDEX);
     }
-    idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
-    idt.page_fault.set_handler_fn(page_fault_handler);
     idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
     idt.stack_segment_fault.set_handler_fn(stack_segment_fault_handler);
     idt.segment_not_present.set_handler_fn(segment_not_present_handler);
@@ -173,11 +177,10 @@ extern "x86-interrupt" fn breakpoint_handler(
 extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame, _error_code: u64) -> !
 {
-    // SERIAL DEBUG: "D" for Double Fault
-    crate::drivers::console::write_serial(b'!');
-    crate::drivers::console::write_serial(b'D');
-    crate::drivers::console::write_serial(b'F');
-    crate::drivers::console::write_serial(b'\n');
+    // Screen Output: !DF
+    crate::video::console_print_char(b'!');
+    crate::video::console_print_char(b'D');
+    crate::video::console_print_char(b'F');
     panic!("[EXCEPTION] DOUBLE FAULT\n{:#?}", stack_frame);
 }
 
@@ -186,38 +189,60 @@ extern "x86-interrupt" fn page_fault_handler(
     error_code: x86_64::structures::idt::PageFaultErrorCode,
 ) {
     use x86_64::registers::control::Cr2;
-    // SERIAL DEBUG: "P" for Page Fault
-    crate::drivers::console::write_serial(b'!');
-    crate::drivers::console::write_serial(b'P');
-    crate::drivers::console::write_serial(b'F');
-    crate::drivers::console::write_serial(b'\n');
+    // Get fault address
+    let cr2 = Cr2::read();
     
-    log::error!("[EXCEPTION] PAGE FAULT");
-    log::error!("Accessed Address: {:?}", Cr2::read());
-    log::error!("Error Code: {:?}", error_code);
-    log::error!("{:#?}", stack_frame);
-    panic!("Page Fault");
+    // Log to Screen
+    crate::video::console_print_char(b'!');
+    crate::video::console_print_char(b'P');
+    crate::video::console_print_char(b'F');
+    
+    // Critical Loop to prevent Double Faults if Panic fails
+    // But we try to panic to show info.
+    panic!(
+        "[EXCEPTION] PAGE FAULT\nAddress: {:?}\nError Code: {:?}\nStack Frame: {:#?}",
+        cr2, error_code, stack_frame
+    );
 }
 
 extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame, error_code: u64)
 {
-    // SERIAL DEBUG: "G" for GPF
-    crate::drivers::console::write_serial(b'!');
-    crate::drivers::console::write_serial(b'G');
-    crate::drivers::console::write_serial(b'P');
-    crate::drivers::console::write_serial(b'F');
-    crate::drivers::console::write_serial(b'\n');
+    // Screen Output: !GP
+    crate::video::console_print_char(b'!');
+    crate::video::console_print_char(b'G');
+    crate::video::console_print_char(b'P');
     
-    log::error!("[EXCEPTION] GENERAL PROTECTION FAULT\nError Code: {}\n{:#?}", error_code, stack_frame);
-    panic!("GPF");
+    // Check CPL from CS (bits 0-1)
+    let cs = stack_frame.code_segment;
+    if (cs & 3) == 0 {
+        // Kernel Fault (likely IRETQ failed)
+        crate::video::console_print_char(b'K');
+    } else {
+        // User Fault
+        crate::video::console_print_char(b'U');
+    }
+    
+    // Print Error Code low nibble
+    let err_low = (error_code & 0xF) as u8;
+    crate::video::console_print_char(if err_low < 10 { b'0' + err_low } else { b'a' + err_low - 10 });
+    
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
+
 
 extern "x86-interrupt" fn invalid_opcode_handler(
     stack_frame: InterruptStackFrame) 
 {
-    log::error!("[EXCEPTION] INVALID OPCODE\n{:#?}", stack_frame);
-    panic!("Invalid Opcode");
+    // Screen Output: !UD
+    crate::video::console_print_char(b'!');
+    crate::video::console_print_char(b'U');
+    crate::video::console_print_char(b'D');
+    
+    // Panic to halt
+    panic!("[EXCEPTION] INVALID OPCODE\n{:#?}", stack_frame);
 }
 
 extern "x86-interrupt" fn stack_segment_fault_handler(
@@ -237,6 +262,18 @@ extern "x86-interrupt" fn segment_not_present_handler(
 extern "x86-interrupt" fn keyboard_interrupt_handler(
     _stack_frame: InterruptStackFrame)
 {
+    // VISUAL DEBUG: Blue Pixel at (5,0) on EVERY Interrupt
+    // Toggle color to confirm activity
+    static mut TOGGLE: bool = false;
+    unsafe {
+        TOGGLE = !TOGGLE;
+        let color = if TOGGLE { 0x000000FF } else { 0x00FFFFFF }; // Blue / White
+        crate::video::draw_pixel(5, 0, color);
+        crate::video::draw_pixel(6, 0, color);
+        crate::video::draw_pixel(5, 1, color);
+        crate::video::draw_pixel(6, 1, color);
+    }
+
     use x86_64::instructions::port::Port;
     
     // 1. Read Scancode
@@ -247,18 +284,6 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
     if let Some(key) = crate::keyboard::process_scancode(scancode) {
         // PUSH TO GLOBAL BUFFER
         crate::drivers::console_input::push_char(key);
-        
-        // OPTIONAL: Local Echo for Debugging (Print to screen immediately)
-        // print!("{}", key); 
-
-        // 3. Inject into Guests (Multi-Cast) - Optional for now
-        if let Some(mut sched_lock) = crate::globals::SCHEDULER.try_lock() {
-            if let Some(sched) = (*sched_lock).as_mut() {
-                for process in &sched.processes {
-                    process.backend.inject_key(key);
-                }
-            }
-        }
     }
 
     // Safety: we must notify EOI
@@ -286,7 +311,17 @@ extern "x86-interrupt" fn timer_interrupt_handler(
     _stack_frame: InterruptStackFrame) 
 {
     // Increment Tick Counter
-    TICKS.fetch_add(1, Ordering::Relaxed);
+    let tick = TICKS.fetch_add(1, Ordering::Relaxed);
+    
+    // VISUAL HEARTBEAT: Toggle a pixel in the corner every ~100ms (~10 ticks @ 100Hz)
+    // This confirms timer interrupt is firing on real hardware
+    if tick % 10 == 0 {
+        let color = if (tick / 10) % 2 == 0 { 0x00FF0000 } else { 0x00000000 }; // Red/Black
+        crate::video::draw_pixel(0, 0, color); // Top-left corner
+        crate::video::draw_pixel(1, 0, color);
+        crate::video::draw_pixel(0, 1, color);
+        crate::video::draw_pixel(1, 1, color);
+    }
     
     // Check for Sleeping Tasks
     crate::sched::check_timers();
@@ -330,6 +365,26 @@ extern "x86-interrupt" fn timer_interrupt_handler(
                 // UPDATE TSS RSP0!
                 unsafe {
                     crate::arch::x86_64::gdt::set_interrupt_stack(kernel_stack_top);
+                    crate::arch::x86_64::syscall::KERNEL_RSP0 = kernel_stack_top;
+                }
+                
+                // SWITCH CR3 (Address Space)
+                let next_cr3 = proc.cr3;
+                if next_cr3 != 0 {
+                    use x86_64::instructions::tlb;
+                    use x86_64::registers::control::Cr3;
+                    use x86_64::structures::paging::PhysFrame;
+                    use x86_64::PhysAddr;
+                    
+                    let (current_cr3, _) = Cr3::read();
+                    if current_cr3.start_address().as_u64() != next_cr3 {
+                        unsafe {
+                            Cr3::write(
+                                PhysFrame::containing_address(PhysAddr::new(next_cr3)),
+                                x86_64::registers::control::Cr3Flags::empty()
+                            );
+                        }
+                    }
                 }
 
                 // Release lock before switch!

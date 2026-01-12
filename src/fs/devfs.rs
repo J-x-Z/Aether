@@ -196,7 +196,7 @@ impl Inode for DevFsRoot {
         }
     }
     
-    fn poll(&self) -> Result<Vec<(String, u64)>, FsError> {
+    fn read_dir(&self) -> Result<Vec<(String, u64)>, FsError> {
         Ok(alloc::vec![
             (String::from("null"), 1),
             (String::from("zero"), 2),

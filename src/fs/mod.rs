@@ -37,11 +37,18 @@ pub fn init(_phys_offset: u64) {
     // Create /bin directory and add BusyBox
     let bin_dir = ramfs.add_dir("bin");
     let busybox_data = initrd::load_busybox();
-    ramfs.add_file_to_dir(&bin_dir, "busybox", busybox_data);
+    ramfs.add_file_to_dir(&bin_dir, "busybox", busybox_data.clone());
     log::info!("[VFS] Added /bin/busybox to RamFS");
-    
-    // Create symlinks for common commands (as files pointing to busybox for now)
-    // In a real VFS, these would be actual symlinks
+    // Create symlinks/copies for common commands
+    // BusyBox shell needs these to exist to execute them if standalone feature is off
+    // Note: In RamFS, content is Vec<u8>, so we must clone it each time.
+    // Ideally RamFS should support hard links or shared buffers (Arc<Vec<u8>>).
+    // For now, cloning 1MB 5 times is fine for boot (5MB total usage).
+    ramfs.add_file_to_dir(&bin_dir, "ls", busybox_data.clone());
+    ramfs.add_file_to_dir(&bin_dir, "cat", busybox_data.clone());
+    ramfs.add_file_to_dir(&bin_dir, "mkdir", busybox_data.clone());
+    ramfs.add_file_to_dir(&bin_dir, "echo", busybox_data.clone());
+    ramfs.add_file_to_dir(&bin_dir, "sh", busybox_data.clone()); // Last one can move if we wanted, but clone for consistency
     
     let root = ramfs.root_inode();
     *ROOT.write() = Some(root);

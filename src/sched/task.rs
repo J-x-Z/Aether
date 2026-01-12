@@ -36,6 +36,7 @@ pub struct Task {
     // Saved context for context switching
     pub saved_rsp: u64,
     pub saved_rip: u64,
+    pub cr3: u64, // Physical address of PML4
     // Exit status
     pub exit_status: i32,
 }
@@ -54,6 +55,7 @@ impl Task {
             fd_table: Vec::new(),
             saved_rsp: 0,
             saved_rip: 0,
+            cr3: 0, // 0 means use default kernel CR3 (shared)
             exit_status: 0,
         };
         
@@ -78,6 +80,7 @@ impl Task {
             fd_table: self.fd_table.clone(),
             saved_rsp: child_rsp,
             saved_rip: child_rip,
+            cr3: self.cr3, // Child inherits parent's address space (vfork/fork style)
             exit_status: 0,
         }
     }

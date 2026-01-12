@@ -25,6 +25,8 @@ mod multitasking;
 mod globals;
 #[cfg(target_arch = "x86_64")]
 mod keyboard;
+#[cfg(target_arch = "x86_64")]
+mod font;
 
 use uefi::prelude::*;
 use uefi::proto::console::gop::GraphicsOutput;
@@ -56,18 +58,36 @@ fn early_serial_print(s: &[u8]) {
 #[cfg(not(target_arch = "x86_64"))]
 fn early_serial_print(_s: &[u8]) {}
 
+// Panic Writer Helper
+struct SerialWriter;
+impl core::fmt::Write for SerialWriter {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for b in s.bytes() {
+            crate::drivers::console::write_serial(b);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    // FORCE SERIAL OUTPUT ON PANIC
-    let msg = b"\n!!!! KERNEL PANIC !!!!\n";
-    for &b in msg { crate::drivers::console::write_serial(b); }
+    // FORCE SERIAL OUTPUT ON PANIC using direct Writer (No alloc, No log locks)
+    use core::fmt::Write;
+    let mut writer = SerialWriter;
     
+    // Print Header
+    let _ = writeln!(writer, "\n!!!! KERNEL PANIC !!!!");
+    
+    // Print Location
     if let Some(location) = info.location() {
-        // We can't format easily without alloc, but we can print basic info if possible
-        // For now, just a marker
+        let _ = writeln!(writer, "Location: {}:{}", location.file(), location.line());
     }
     
+    // Print Message
+    let _ = writeln!(writer, "Message: {}", info.message());
+    
+    // Halt
     loop {
         core::hint::spin_loop(); 
     }
@@ -84,6 +104,9 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // Initialize UEFI services/console manually if needed
     // But SystemTable is already usable.
     system_table.stdout().reset(false).unwrap();
+    
+    // DISABLE WATCHDOG TIMER (Fixes 3-minute reboot)
+    system_table.boot_services().set_watchdog_timer(0, 0x10000, None).unwrap_or(());
     
     // Helper macro for screen output
     macro_rules! screen_print {
@@ -106,7 +129,7 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     screen_print!(system_table, "[BOOT] Log initialized");
     
     // Initialize UEFI Input (for Hyper-V keyboard)
-    const ENABLE_UEFI_INPUT: bool = false;
+    const ENABLE_UEFI_INPUT: bool = true;
     if ENABLE_UEFI_INPUT {
         unsafe {
             drivers::uefi_input::init_protocol(system_table.stdin() as *mut _);
@@ -122,6 +145,7 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     #[cfg(target_arch = "x86_64")]
     if ENABLE_GOP {
         screen_print!(system_table, "[BOOT] About to init GOP...");
+        init_video(&system_table); // <-- THIS WAS MISSING!
         screen_print!(system_table, "[BOOT] GOP init returned");
         early_serial_print(b"[BOOT] Video OK\r\n");
         // Removed GOP stall as it passed
@@ -159,13 +183,36 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     screen_print!(system_table, "[Arch] Initializing Syscall MSRs...");
     arch::syscall::init();
     screen_print!(system_table, "[Arch] Syscall MSRs set");
+
+    // VERIFY: Read back LSTAR to ensure it's set correctly
+    unsafe {
+        let msr = 0xC0000082u32; // LSTAR
+        let low: u32;
+        let high: u32;
+        core::arch::asm!("rdmsr", in("ecx") msr, out("eax") low, out("edx") high, options(nomem, nostack));
+        let lstar_val = ((high as u64) << 32) | (low as u64);
+        let entry_addr = arch::x86_64::syscall::syscall_entry as *const () as u64;
+        
+        // Print LSTAR verification to screen
+        use core::fmt::Write;
+        writeln!(system_table.stdout(), "[Kernel] LSTAR: 0x{:x}", lstar_val).ok();
+        writeln!(system_table.stdout(), "[Kernel] Func : 0x{:x}", entry_addr).ok();
+    }
     
     early_serial_print(b"[BOOT] Arch OK, loading IDT...\r\n");
 
     #[cfg(target_arch = "x86_64")]
     {
-        interrupts::init_idt();
-        log::info!("[Kernel] IDT initialized");
+        // CRITICAL CHANGE: Do NOT load our IDT if we want UEFI Input!
+        // Loading our IDT kills the UEFI Timer events that poll USB.
+        // We will rely on UEFI's IDT for hardware interrupts.
+        // Exceptions in Ring 3 will now probably reboot the machine (UEFI handler).
+        if !ENABLE_UEFI_INPUT {
+            interrupts::init_idt();
+            log::info!("[Kernel] IDT initialized");
+        } else {
+            log::warn!("[Kernel] IDT initialization SKIPPED to preserve UEFI Input");
+        }
     }
     
     // 3. Initialize Memory Management
@@ -200,8 +247,16 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     system_table.boot_services().stall(1_000_000); // STALL 1s
     #[cfg(target_arch = "x86_64")]
     {
-        interrupts::enable();
-        screen_print!(system_table, "[Kernel] Interrupts ENABLED");
+        if !ENABLE_UEFI_INPUT {
+            interrupts::enable();
+            screen_print!(system_table, "[Kernel] Interrupts ENABLED");
+        } else {
+             // If relying on UEFI IDT, interrupts might be enabled already or managed by us in syscalls.
+             // But actually, we should make sure they are enabled.
+             // Safer to simple STI to be sure.
+             unsafe { core::arch::asm!("sti"); }
+             screen_print!(system_table, "[Kernel] Interrupts FORCED (STI) for UEFI");
+        }
     }
     system_table.boot_services().stall(1_000_000); // STALL 1s
     
@@ -238,21 +293,41 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                     screen_print!(system_table, "[Kernel] BusyBox loaded!");
                     system_table.boot_services().stall(1_000_000); // STALL 1s
                     
-                    // Set up Auxv
+                    // Set up Auxv - musl needs these for proper startup
+                    // Create a static random bytes buffer for AT_RANDOM
+                    static mut RANDOM_BYTES: [u8; 16] = [
+                        0x42, 0x13, 0x37, 0xAB, 0xCD, 0xEF, 0x01, 0x23,
+                        0x45, 0x67, 0x89, 0xBA, 0xDC, 0xFE, 0x98, 0x76,
+                    ];
+                    let random_ptr = unsafe { RANDOM_BYTES.as_ptr() as u64 };
+                    
+                    use syscall::elf::{AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_ENTRY, AT_RANDOM, AT_UID, AT_EUID, AT_GID, AT_EGID};
                     let auxv = alloc::vec![
                         AuxvEntry { key: AT_PAGESZ, val: 4096 },
+                        AuxvEntry { key: AT_PHDR, val: loaded.phdr_vaddr },
+                        AuxvEntry { key: AT_PHENT, val: loaded.phentsize as u64 },
+                        AuxvEntry { key: AT_PHNUM, val: loaded.phnum as u64 },
+                        AuxvEntry { key: AT_ENTRY, val: loaded.entry_point },
+                        AuxvEntry { key: AT_RANDOM, val: random_ptr },
+                        AuxvEntry { key: AT_UID, val: 0 },
+                        AuxvEntry { key: AT_EUID, val: 0 },
+                        AuxvEntry { key: AT_GID, val: 0 },
+                        AuxvEntry { key: AT_EGID, val: 0 },
                     ];
                     
                     // argv: "sh" (BusyBox multi-call binary uses argv[0] to determine behavior)
                     let argv: &[&[u8]] = &[b"sh"];
                     let envp: &[&[u8]] = &[];
                     
-                    // Set up stack (at high address)
-                    let stack_top = 0x7FFFFF000000u64;
+                    // Set up stack - Use LOW address within 64GB identity map
+                    // 0x7FFFFF000000 is ~140TB which requires PML4[255] allocation
+                    // Instead use 0x7F000000 (~2GB) which is identity-mapped
+                    let stack_top = 0x7F000000u64;
                     let stack_size = 128 * 1024; // 128KB
                     
                     screen_print!(system_table, "[Kernel] Mapping user stack...");
                     mm::paging::make_user_accessible(stack_top - stack_size, stack_size);
+
                     screen_print!(system_table, "[Kernel] User stack mapped!");
                     
                     screen_print!(system_table, "[Kernel] Setting up user stack...");
@@ -260,10 +335,26 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                     screen_print!(system_table, "[Kernel] User stack set up!");
                     
                     screen_print!(system_table, "[Kernel] Setting up kernel stack for TSS...");
-                    // CRITICAL: Allocate Kernel Stack for this process (PID 1) and update TSS!
-                    // Otherwise interrupts/syscalls from Ring 3 will crash (Double Fault) due to RSP0=0.
-                    let mut kernel_stack = alloc::vec![0u8; 128 * 1024]; // 128KB
-                    let kernel_stack_top = (kernel_stack.as_ptr() as u64 + kernel_stack.len() as u64) & !0xF;
+                    // CRITICAL: Use STATIC kernel stack to ensure address is in identity-mapped region
+                    // Heap-allocated stack might have issues on real hardware.
+                    static mut KERNEL_STACK_STORAGE: [u8; 128 * 1024] = [0; 128 * 1024];
+                    let kernel_stack_top = unsafe {
+                        (KERNEL_STACK_STORAGE.as_ptr() as u64 + KERNEL_STACK_STORAGE.len() as u64) & !0xF
+                    };
+                    
+                    // DEBUG: Print kernel_stack_top value
+                    early_serial_print(b"[Kernel] RSP0=0x");
+                    for i in (0..16).rev() {
+                        let nibble = ((kernel_stack_top >> (i * 4)) & 0xF) as u8;
+                        let c = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
+                        early_serial_print(&[c]);
+                    }
+                    early_serial_print(b"\r\n");
+                    // Also output to screen
+                    // crate::video::console_print_char(b'K');
+                    // crate::video::console_print_char(b':');
+                    
+                    
                     unsafe {
                         crate::arch::x86_64::gdt::set_interrupt_stack(kernel_stack_top);
                     }
@@ -272,14 +363,37 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                     #[cfg(target_arch = "x86_64")]
                     crate::arch::x86_64::syscall::setup_syscall_stacks(kernel_stack_top);
                     
-                    // Prevent deallocation of stack
-                    core::mem::forget(kernel_stack);
+                    // VERIFY: Proactively touch the kernel stack to ensure it's mapped/writable
+                    unsafe {
+                        let ptr = (kernel_stack_top - 8) as *mut u64;
+                        *ptr = 0xDEADBEEF; // Write test
+                        if *ptr != 0xDEADBEEF {
+                             screen_print!(system_table, "[Kernel] Stack R/W Failed!");
+                        } else {
+                             screen_print!(system_table, "[Kernel] Stack R/W OK");
+                        }
+                    }
+                    
                     screen_print!(system_table, "[Kernel] Kernel stack ready!");
 
                     screen_print!(system_table, "[Kernel] STALL 3s before User Mode...");
                     system_table.boot_services().stall(3_000_000); // STALL 3s
 
                     screen_print!(system_table, "[Kernel] Jumping to Ring 3...");
+                    // Debug: Print entry_point and stack_pointer in hex using early_serial_print
+                    early_serial_print(b"[Kernel] EP=0x");
+                    for i in (0..16).rev() {
+                        let nibble = ((loaded.entry_point >> (i * 4)) & 0xF) as u8;
+                        let c = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
+                        early_serial_print(&[c]);
+                    }
+                    early_serial_print(b" SP=0x");
+                    for i in (0..16).rev() {
+                        let nibble = ((user_sp >> (i * 4)) & 0xF) as u8;
+                        let c = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
+                        early_serial_print(&[c]);
+                    }
+                    early_serial_print(b"\r\n");
                     // Jump to Ring 3
                     unsafe {
                         arch::enter_usermode(loaded.entry_point, user_sp);

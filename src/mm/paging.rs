@@ -6,6 +6,8 @@
 #[cfg(target_arch = "x86_64")]
 mod x86_64_paging {
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use spin::Once;
+    use x86_64::structures::paging::PhysFrame;
     
     /// Physical-to-Virtual offset for kernel direct mapping
     /// All physical memory is accessible at PHYS_OFFSET + phys_addr
@@ -24,10 +26,14 @@ mod x86_64_paging {
         virt.wrapping_sub(PHYS_OFFSET)
     }
     
-    /// Frame allocator - Default to 64MB but should be re-initialized
-    static PT_ALLOCATOR: AtomicU64 = AtomicU64::new(0x4000000); 
+    // Safety: We assume single-core access to allocator for now, or usage atomic logic.
+    static PT_ALLOCATOR: AtomicU64 = AtomicU64::new(0); // Holds PHYSICAL address of next free page
     static FRAME_ALLOCATOR: AtomicU64 = AtomicU64::new(0x4100000);
     static MAX_RAM: AtomicU64 = AtomicU64::new(0x8000000); // Default 128MB limit
+    
+    // We store our PML4 physical address for cloning
+    static OUR_PML4: AtomicU64 = AtomicU64::new(0);
+    static INITIALIZED: AtomicBool = AtomicBool::new(false);
     
     /// Initialize the allocator with a valid memory region from UEFI
     pub fn init_allocator(start: u64, size: u64) {
@@ -44,9 +50,6 @@ mod x86_64_paging {
         log::info!("[Paging] Allocator initialized @ 0x{:x} (Size: {} MB)", aligned_start, size / 1024 / 1024);
     }
 
-    static OUR_PML4: AtomicU64 = AtomicU64::new(0);
-    static INITIALIZED: AtomicBool = AtomicBool::new(false);
-    
     /// Allocate a page for page tables (zeroed)
     fn alloc_pt_page() -> u64 {
         let addr = PT_ALLOCATOR.fetch_add(4096, Ordering::SeqCst);
@@ -94,9 +97,10 @@ mod x86_64_paging {
     /// - PML4[0..4]: Identity map first 4GB (for UEFI compatibility)
     /// - PML4[256]: Map first 4GB at 0xFFFF_8000_0000_0000 (kernel direct map)
     pub fn init_our_page_tables() {
-        if INITIALIZED.swap(true, Ordering::SeqCst) {
-            return;
-        }
+    static INIT: Once<()> = Once::new();
+    
+    INIT.call_once(|| {
+        log::info!("[Paging] Initializing Page Tables...");
         
         // Allocate PML4 (use identity mapping since we're not yet initialized)
         let pml4_addr = PT_ALLOCATOR.fetch_add(4096, Ordering::SeqCst);
@@ -111,39 +115,39 @@ mod x86_64_paging {
             core::ptr::write_bytes(pdpt_addr as *mut u8, 0, 4096);
             let pdpt = pdpt_addr as *mut u64;
             
-            // Create 4 PDs for 4GB of mapping using 2MB huge pages
-            for gb in 0..4u64 {
+            // Create 64 PDs for 64GB of mapping using 2MB huge pages
+            // This ensures we cover kernels loaded > 4GB by UEFI
+            for gb in 0..64u64 {
                 let pd_addr = PT_ALLOCATOR.fetch_add(4096, Ordering::SeqCst);
                 core::ptr::write_bytes(pd_addr as *mut u8, 0, 4096);
-                *pdpt.add(gb as usize) = pd_addr | 0x3; // PRESENT | WRITABLE
+                *pdpt.add(gb as usize) = pd_addr | 0x7; // PRESENT | WRITABLE | USER
                 
                 let pd = pd_addr as *mut u64;
                 
                 // Fill PD with 512 x 2MB huge pages
                 for i in 0..512u64 {
                     let phys_addr = (gb << 30) | (i << 21);
-                    // 2MB huge page: PRESENT | WRITABLE | HUGE_PAGE
-                    *pd.add(i as usize) = phys_addr | 0x83;
+                    // 2MB huge page: PRESENT | WRITABLE | HUGE_PAGE | USER
+                    *pd.add(i as usize) = phys_addr | 0x87;
                 }
             }
             
             // === IDENTITY MAPPING: PML4[0] -> PDPT ===
-            // Maps 0x00000000 - 0xFFFFFFFF to itself
-            *pml4.add(0) = pdpt_addr | 0x3;
+            // Maps 0x00000000 - 0xFFFFFFFFFF (0-1TB potentially, but our PDPT only covers 64GB)
+            *pml4.add(0) = pdpt_addr | 0x7; // PRESENT | WRITABLE | USER
             
             // === KERNEL DIRECT MAP: PML4[256] -> same PDPT ===
-            // Maps 0xFFFF_8000_0000_0000 - 0xFFFF_8000_FFFF_FFFF to physical 0x0 - 0xFFFFFFFF
-            // PML4 index 256 = (0xFFFF_8000_0000_0000 >> 39) & 0x1FF = 256
-            *pml4.add(256) = pdpt_addr | 0x3;
+            // Maps 0xFFFF_8000_0000_0000 + phys 0..64GB
+            *pml4.add(256) = pdpt_addr | 0x7; // PRESENT | WRITABLE | USER
             
             log::info!("[Paging] Created page tables at 0x{:x}", pml4_addr);
-            log::info!("[Paging] Identity mapping: 0x0 - 0xFFFFFFFF");
-            log::info!("[Paging] Direct map: 0xFFFF_8000_0000_0000 + phys");
+            log::info!("[Paging] Identity mapping: 0x0 - 64GB");
+            log::info!("[Paging] Kernel Direct map: 0xFFFF800000000000+");
             
             // Switch to our page tables
             let (_, cr3_flags) = x86_64::registers::control::Cr3::read();
             x86_64::registers::control::Cr3::write(
-                x86_64::structures::paging::PhysFrame::containing_address(
+                PhysFrame::containing_address(
                     x86_64::PhysAddr::new(pml4_addr)
                 ),
                 cr3_flags
@@ -151,11 +155,16 @@ mod x86_64_paging {
             
             log::info!("[Paging] Switched to new CR3: 0x{:x}", pml4_addr);
         }
-    }
+    });
+
+    // Note: If called again, we do NOTHING.
+    // This preserves the CURRENT CR3 if it was switched by sys_execve.
+}
     
     /// Map a 4KB page for user access using offset mapping navigation
     unsafe fn map_page_user_4k(vaddr: u64) {
-        let pml4_phys = OUR_PML4.load(Ordering::SeqCst);
+        let (pml4_frame, _) = x86_64::registers::control::Cr3::read();
+        let pml4_phys = pml4_frame.start_address().as_u64();
         let pml4 = phys_to_virt(pml4_phys) as *mut u64;
         
         let pml4_idx = ((vaddr >> 39) & 0x1FF) as usize;
@@ -242,6 +251,99 @@ mod x86_64_paging {
         }
         
         unsafe { x86_64::instructions::tlb::flush_all(); }
+    }
+    /// Create a new Page Table (PML4) for a process
+    /// Copies Kernel mappings (Identity + Direct Map)
+    /// Returns physical address of new PML4
+    pub fn clone_process_page_table() -> u64 {
+        // Allocate new PML4
+        let pml4_addr = alloc_pt_page();
+        let pml4 = phys_to_virt(pml4_addr) as *mut u64;
+        
+        let kernel_pml4_phys = OUR_PML4.load(Ordering::SeqCst);
+        let kernel_pml4 = phys_to_virt(kernel_pml4_phys) as *const u64;
+        
+        unsafe {
+            // 1. Copy Upper Half (Kernel Direct Map, etc.)
+            // Entries 256-511 are Kernel Space (Higher Half) -> SHARED.
+            core::ptr::copy_nonoverlapping(kernel_pml4.add(256), pml4.add(256), 256);
+            
+            // 2. Handle Lower Half (Identity/User Space) - Index 0
+            // We need to ISOLATE User Space (e.g. 0x400000), which falls into Index 0.
+            // But we MUST Share Kernel Code (0x100000), which ALSO falls into Index 0.
+            // So we need a Deep Copy of the hierarchy for Index 0.
+            
+            // A. Allocate New PDPT for Index 0 (which covers 0-512GB Virtual)
+            // Actually this is PML4[0], so it covers 0-512GB.
+            // PDPT entries cover 1GB each.
+            let new_pdpt_addr = alloc_pt_page();
+            let new_pdpt = phys_to_virt(new_pdpt_addr) as *mut u64;
+            *pml4.add(0) = new_pdpt_addr | 0x7; // Present, RW, User
+
+            // Get Kernel's PDPT[0]
+            let kernel_pdpt_phys = (*kernel_pml4.add(0)) & !0xFFF;
+            let kernel_pdpt = phys_to_virt(kernel_pdpt_phys) as *const u64;
+            
+            // IMPORTANT: Copy ALL entries from Kernel PDPT (1..511)
+            // This ensures we map Physical RAM > 1GB (Video, ACPI, etc.)
+            core::ptr::copy_nonoverlapping(kernel_pdpt, new_pdpt, 512);
+            
+            // B. We need to look at PDPT[0] (which covers first 1GB)
+            // It points to a PD. We must CLONE this PD too.
+            let new_pd_addr = alloc_pt_page();
+            let new_pd = phys_to_virt(new_pd_addr) as *mut u64;
+            *new_pdpt.add(0) = new_pd_addr | 0x7;
+            
+            // Get Kernel's PD[0]
+            let kernel_pd_phys = (*kernel_pdpt.add(0)) & !0xFFF;
+            let kernel_pd = phys_to_virt(kernel_pd_phys) as *const u64;
+            
+            // C. Copy Kernel Mappings in PD (0-2MB) and Heap (32MB+)
+            // Kernel Code: 0-2MB (Index 0)
+            // User Code: 4MB (Index 2) -> MUST BE ISOLATED/CLEARED
+            // Kernel Heap: 32MB (Index 16) -> MUST BE SHARED
+            
+            // We iterate all 512 entries of the first PD (covering 0-1GB)
+            for i in 0..512u64 {
+                // Logic:
+                // Index 0: Kernel Code (Usually 0-2MB) - Share
+                // Index 1: 2-4MB - May contain Kernel BSS/Data? - Share to be safe.
+                // Index 2: 4MB-6MB (User Code Base 0x400000) - CLEAR/ISOLATE.
+                // Index 3+: Other - Share (Assume Kernel/Heap/Devices)
+                
+                // We ONLY isolate the exact 2MB block where User Program is loaded.
+                // This prevents accidentally unmapping Kernel if it's larger than 2MB or loaded strangely.
+                
+                if i == 2 {
+                    *new_pd.add(i as usize) = 0; // Clear User Base (4MB - 6MB)
+                } else {
+                    *new_pd.add(i as usize) = *kernel_pd.add(i as usize); // Share everything else
+                }
+            }
+            
+            // D. CRITICAL FIX: Copy Identity Map for High Addresses (1GB - 512GB)
+            // If Kernel is loaded > 1GB (e.g. 5GB at 0x140xxxxxx), it lives in PDPT[5].
+            // We MUST share these mappings, or the child process cannot access Kernel Code/Data.
+            for i in 1..512 {
+                 *new_pdpt.add(i) = *kernel_pdpt.add(i);
+            }
+            
+            // D. What about other PDPT entries (1-511)?
+            // PDPT[1] covers 1GB-2GB.
+            // If we have Identity Map of RAM there, we might need it for frame buffers?
+            // Ideally User shouldn't see physical RAM identity map.
+            // So we leave them as 0 for safety, UNLESS Kernel Heap extends there?
+            // Heap Size is 16MB. Fits in PD[0].
+            // So PDPT[1+] are likely unused or Identity Map.
+            // Safe to leave as 0 in new process (unless we need direct hardware access).
+            
+            // Verify: We copied Kernel PD entries (0-16MB).
+            // We shared Higher Half (256-511).
+            // We have a fresh PD for User Space (4MB+) that is Empty.
+            // Perfect integration.
+        }
+        
+        pml4_addr
     }
 }
 

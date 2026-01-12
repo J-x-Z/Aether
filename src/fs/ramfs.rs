@@ -119,7 +119,7 @@ impl Inode for RamNode {
         match &*guard {
             RamNodeData::File { content } => Metadata {
                 size: content.len() as u64,
-                mode: FileMode(FileMode::READ | FileMode::WRITE),
+                mode: FileMode(FileMode::READ | FileMode::WRITE | FileMode::EXEC),
                 file_type: FileType::File,
             },
             RamNodeData::Directory { .. } => Metadata {
@@ -130,7 +130,7 @@ impl Inode for RamNode {
         }
     }
     
-    fn poll(&self) -> Result<Vec<(String, u64)>, FsError> {
+    fn read_dir(&self) -> Result<Vec<(String, u64)>, FsError> {
         let guard = self.data.read();
         match &*guard {
             RamNodeData::Directory { children } => {

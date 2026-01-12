@@ -12,8 +12,13 @@ use spin::Lazy;
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
+// Static kernel stack for Ring 3 -> Ring 0 transitions (RSP0)
+static mut KERNEL_STACK_FOR_RSP0: [u8; 4096 * 32] = [0; 4096 * 32]; // 128KB
+
 static TSS: Lazy<TaskStateSegment> = Lazy::new(|| {
     let mut tss = TaskStateSegment::new();
+    
+    // IST[0] - Used for Double Fault (separate stack to prevent Triple Fault)
     tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
         const STACK_SIZE: usize = 4096 * 5;
         static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
@@ -21,6 +26,15 @@ static TSS: Lazy<TaskStateSegment> = Lazy::new(|| {
         let stack_end = stack_start + STACK_SIZE;
         stack_end
     };
+    
+    // RSP0 - Used for Ring 3 -> Ring 0 transitions (interrupts/exceptions)
+    // CRITICAL: Without this, Ring 3 exceptions cause Double Fault!
+    tss.privilege_stack_table[0] = {
+        let stack_start = VirtAddr::from_ptr(unsafe { &raw const KERNEL_STACK_FOR_RSP0 });
+        let stack_end = stack_start + core::mem::size_of_val(unsafe { &KERNEL_STACK_FOR_RSP0 });
+        stack_end
+    };
+    
     tss
 });
 

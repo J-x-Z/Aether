@@ -18,6 +18,7 @@ pub struct Process {
     pub state: ProcessState,
     pub stack: alloc::vec::Vec<u8>,
     pub stack_pointer: usize,
+    pub cr3: u64, // Physical Address of PML4
 }
 
 pub struct Scheduler {
@@ -57,6 +58,7 @@ impl Scheduler {
             state: ProcessState::Ready,
             stack,
             stack_pointer,
+            cr3: 0, // Default to 0 (Kernel/Shared)
         });
         
         log::info!("[Scheduler] Spawned Process {} (SP: {:x})", pid, stack_pointer);

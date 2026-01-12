@@ -37,7 +37,7 @@ else
 fi
 
 qemu-system-x86_64 \
-    -m 512M \
+    -m 6G \
     -bios "$UEFI_FW" \
     -drive format=raw,file=fat:rw:"$ESP_DIR" \
     -nographic \

@@ -83,6 +83,9 @@ pub unsafe extern "C" fn syscall_entry() {
         // We must switch to kernel stack and save everything.
         // =================================================================================
         
+        // NO DEBUG HERE - serial port polling hangs on hardware without COM1!
+        // Debug output will be done in syscall_dispatch (via console_print_char)
+        
         // 1. Save R15 to User Stack (so we can use R15 as scratch)
         // We push R15 to user stack. Then we save RSP (which points to saved R15).
         "push r15", 
@@ -92,8 +95,7 @@ pub unsafe extern "C" fn syscall_entry() {
         
         // 3. Switch to Kernel Stack
         // Use consistent LEA + MOV approach to safely load from static
-        "lea rsp, [{kernel_rsp}]",
-        "mov rsp, [rsp]",
+        "mov rsp, [rip + KERNEL_RSP0]",
         
         // 4. Save User RSP (the value in R15)
         "push r15",
@@ -136,8 +138,14 @@ pub unsafe extern "C" fn syscall_entry() {
         "mov r8, [rsp+16]",    // a1 (RSI)
         "mov r9, [rsp+24]",    // a2 (RDX)
         
+        // Shadow Space for MS x64 ABI (32 bytes)
+        "sub rsp, 32",
+        
         // 7. Call Dispatcher
         "call syscall_dispatch",
+        
+        // Restore Stack
+        "add rsp, 32",
         
         // 8. Handle Return Value (RAX)
         // Overwrite saved RAX on stack with return value
@@ -168,8 +176,6 @@ pub unsafe extern "C" fn syscall_entry() {
         
         // 12. Return
         "sysretq",
-        
-        kernel_rsp = sym KERNEL_RSP0,
     );
 }
 
@@ -201,6 +207,7 @@ pub fn setup_syscall_stacks(kernel_stack_top: u64) {
 #[no_mangle]
 #[inline(never)]
 pub extern "C" fn syscall_dispatch(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
-    log::debug!("[Syscall] nr={} a0=0x{:x} a1=0x{:x} a2=0x{:x}", nr, arg0, arg1, arg2);
+    // Normal Dispatch
+    // log::debug!("[Syscall] nr={} a0=0x{:x} a1=0x{:x} a2=0x{:x}", nr, arg0, arg1, arg2);
     crate::syscall::dispatch(nr, arg0, arg1, arg2)
 }

@@ -74,7 +74,9 @@ pub fn write_serial(byte: u8) {
             let mut port_data = Port::<u8>::new(COM1);
             port_data.write(byte);
         }
-        // If timeout reached, silently skip (no COM1 available)
+        // Always try to write to screen
+        #[cfg(target_arch = "x86_64")]
+        crate::video::console_print_char(byte);
     }
 }
 

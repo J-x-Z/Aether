@@ -28,6 +28,21 @@ pub struct IoVec {
     pub len: u64,
 }
 
+// Helper to get current PID safely and solve E0597
+fn get_current_pid() -> usize {
+    let arc_clone;
+    {
+        let current_lock = CURRENT_TASK.lock();
+        if let Some(task) = current_lock.as_ref() {
+             arc_clone = task.clone();
+        } else {
+             panic!("Zombie");
+        }
+    }
+    let guard = arc_clone.lock();
+    guard.id
+}
+
 pub fn sys_poll(fds: usize, nfds: usize, timeout: usize) -> isize {
     let fds_ptr = fds as *mut PollFd;
     // Timeout is in milliseconds
@@ -118,16 +133,21 @@ pub mod numbers {
     pub const SYS_BRK: usize = 12;
     pub const SYS_IOCTL: usize = 16;
     pub const SYS_WRITEV: usize = 20;
+    pub const SYS_ACCESS: usize = 21;
     
     // File descriptors
     pub const SYS_DUP: usize = 32;
     pub const SYS_DUP2: usize = 33;
     pub const SYS_PIPE: usize = 22;
     
+    // At syscalls
+    pub const SYS_FACCESSAT: usize = 269;
+    
     // Process
     pub const SYS_GETPID: usize = 39;
     pub const SYS_CLONE: usize = 56;
     pub const SYS_FORK: usize = 57;
+    pub const SYS_VFORK: usize = 58;
     pub const SYS_EXECVE: usize = 59;
     pub const SYS_EXIT: usize = 60;
     pub const SYS_WAIT4: usize = 61;
@@ -156,20 +176,14 @@ pub mod numbers {
     pub const SYS_ARCH_PRCTL: usize = 158;
     pub const SYS_SET_TID_ADDRESS: usize = 218;
     pub const SYS_EXIT_GROUP: usize = 231;
+    
+    // Directory operations
+    pub const SYS_GETDENTS64: usize = 217;
 }
 
 /// Main syscall dispatcher
 pub fn dispatch(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
-    // Debug: Log syscall number via serial
-    // Only log important syscalls to avoid spam
-    if nr == numbers::SYS_WRITE || nr == numbers::SYS_READ || nr == numbers::SYS_EXIT {
-        // Simple debug: write 'S' + syscall number digit to serial
-        crate::drivers::console::write_serial(b'[');
-        crate::drivers::console::write_serial(b'S');
-        crate::drivers::console::write_serial(b'0' + (nr / 10) as u8);
-        crate::drivers::console::write_serial(b'0' + (nr % 10) as u8);
-        crate::drivers::console::write_serial(b']');
-    }
+    // TRACE REMOVED: Clean output for Shell
     
     // Sanity check: Linux x86_64 has ~450 syscalls, anything much larger is suspicious
     if nr > 500 {
@@ -183,6 +197,8 @@ pub fn dispatch(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
         numbers::SYS_POLL => sys_poll(arg0, arg1, arg2),
         numbers::SYS_IOCTL => sys_ioctl(arg0, arg1, arg2),
         numbers::SYS_WRITEV => sys_writev(arg0, arg1, arg2),
+        numbers::SYS_ACCESS => sys_access(arg0, arg1),
+        numbers::SYS_FACCESSAT => sys_faccessat(arg0, arg1, arg2, 0), // arg3=flags (ignore for stub)
         numbers::SYS_OPEN => sys_open(arg0, arg1, arg2),
         numbers::SYS_CLOSE => sys_close(arg0),
         numbers::SYS_STAT => sys_stat(arg0, arg1),
@@ -204,6 +220,7 @@ pub fn dispatch(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
         // Process
         numbers::SYS_GETPID => sys_getpid(),
         numbers::SYS_FORK => sys_fork(),
+        numbers::SYS_VFORK => sys_vfork(),
         numbers::SYS_CLONE => sys_clone(arg0, arg1, arg2),
         numbers::SYS_EXECVE => sys_execve(arg0, arg1, arg2),
         numbers::SYS_EXIT => sys_exit(arg0),
@@ -221,7 +238,12 @@ pub fn dispatch(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
         numbers::SYS_GETUID => sys_getuid(),
         numbers::SYS_GETGID => sys_getgid(),
         numbers::SYS_GETEUID => sys_geteuid(),
+        numbers::SYS_GETGID => sys_getgid(),
+        numbers::SYS_GETEUID => sys_geteuid(),
         numbers::SYS_GETEGID => sys_getegid(),
+        
+        // Directory
+        numbers::SYS_GETDENTS64 => sys_getdents64(arg0, arg1, arg2),
         
         // Musl-required syscalls (stubs for BusyBox startup)
         numbers::SYS_MPROTECT => {
@@ -327,27 +349,56 @@ fn sys_read(fd: usize, buf_ptr: usize, count: usize) -> isize {
         let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, count) };
         let mut nread = 0;
         
-        // Try to read at least one char (from buffer OR hardware)
-        while nread < count {
+        // Blocking Read Loop
+        loop {
+            // FORCE ENABLE INTERRUPTS (`sti`)
+            // The `syscall` instruction disables interrupts (SFMASK).
+            // But UEFI polling or legacy USB emulation might require timer interrupts/SMM to process USB.
+            unsafe { core::arch::asm!("sti"); }
+            
+            // UEFI Poll: REQUIRED for bare metal USB keyboards if PS/2 is dead
+            // We can do this because we haven't exited boot services!
+            crate::drivers::uefi_input::poll();
+            
+            let mut got_char = false;
+            
+            // Only read from the Global Input Queue (fed by Interrupts OR UEFI poll)
             if let Some(c) = crate::drivers::console_input::pop_char() {
                 buf[nread] = c;
                 nread += 1;
-            } else if let Some(c) = crate::drivers::console::read_serial() {
-                // Fallback: Poll hardware directly
-                buf[nread] = c;
-                nread += 1;
-            } else {
-                break;
+                got_char = true;
+                // Debug echo to screen
+                // unsafe { crate::video::console_print_char(c); }
             }
-        }
-        
-        if nread > 0 {
-            return nread as isize;
-        } else {
-            // No data available
-            // If strict blocking is needed, we should yield.
-            // For now, return EAGAIN to let busybox poll.
-            return -11; // EAGAIN
+            // SERIAL POLLING REMOVED (Fix '????' spam caused by floating bus 0xFF)
+            
+            if got_char {
+                // If we filled the buffer, return
+                if nread >= count {
+                    // Disable Interrupts again before returning (Syscall ABI usually assumes IF=0 on exit path, though sysret sets it back from R11)
+                    // Actually, sysret will load R11 into RFLAGS. R11 came from old RFLAGS (IF=1).
+                    // So we don't strictly need to CLI, but it's safer for kernel state consistency.
+                    unsafe { core::arch::asm!("cli"); }
+                    return nread as isize;
+                }
+                // If we have data but buffer not full, we COULD return,
+                // or check for more. Standard TTY usually returns line-buffered or immediate.
+                // For raw blocking read, return what we have (short read).
+                // But let's check one more time just in case of pasted input.
+                if !crate::drivers::console_input::has_data() {
+                     unsafe { core::arch::asm!("cli"); }
+                     return nread as isize;
+                }
+            } else {
+                // No data yet.
+                if nread > 0 {
+                    unsafe { core::arch::asm!("cli"); }
+                    return nread as isize;
+                }
+                
+                // Wait for Interrupts OR Poll Delay
+                crate::sched::yield_now();
+            }
         }
     }
 
@@ -371,9 +422,12 @@ fn sys_write(fd: usize, buf_ptr: usize, count: usize) -> isize {
     if fd == 1 || fd == 2 {
         unsafe {
             let slice = core::slice::from_raw_parts(buf_ptr as *const u8, count);
-            // Write directly to serial port for QEMU visibility
+            // DEBUG: Trace removed
+            // crate::video::console_print_char(b'W');
+            
+            // Write to framebuffer console (Safe for real hardware)
             for &byte in slice {
-                crate::drivers::console::write_serial(byte);
+                crate::video::console_print_char(byte);
             }
         }
         return count as isize;
@@ -420,7 +474,7 @@ fn sys_exit(code: usize) -> isize {
 
 /// Program break management (heap allocation)
 /// For now, we use a simple linear allocator
-static mut PROGRAM_BREAK: usize = 0x800000; // Start at 8MB
+static mut PROGRAM_BREAK: usize = 0x40000000; // Start at 1GB to avoid collisions
 
 fn sys_brk(addr: usize) -> isize {
     unsafe {
@@ -457,16 +511,29 @@ fn sys_getpid() -> isize {
 
 /// Memory map (simplified stub)
 fn sys_mmap(addr: usize, length: usize, _prot: usize) -> isize {
+    // TRACE REMOVED
+    
     // Simple anonymous mapping at requested address
     if addr == 0 {
         // Kernel chooses address
         unsafe {
             let new_addr = PROGRAM_BREAK;
+            // Align check (should be aligned)
+            
             let aligned_len = (length + 4095) & !4095;
             PROGRAM_BREAK += aligned_len;
             
             crate::mm::paging::make_user_accessible(new_addr as u64, aligned_len as u64);
             log::debug!("[syscall::mmap] Mapped {} bytes at 0x{:x}", aligned_len, new_addr);
+            
+            // CRITICAL FIX: Zero the memory! 
+            // make_user_accessible likely reuses Identity Mapped pages (dirty RAM).
+            // Musl expects zeroed memory for BSS/Heap.
+            // We use the direct address since it's identity mapped and user-accessible.
+            core::ptr::write_bytes(new_addr as *mut u8, 0, aligned_len);
+
+            // TRACE REMOVED
+            
             return new_addr as isize;
         }
     }
@@ -475,12 +542,34 @@ fn sys_mmap(addr: usize, length: usize, _prot: usize) -> isize {
     let aligned_len = (length + 4095) & !4095;
     crate::mm::paging::make_user_accessible(addr as u64, aligned_len as u64);
     log::debug!("[syscall::mmap] Mapped {} bytes at 0x{:x} (fixed)", aligned_len, addr);
+    
+    // Zero Fixed Mapping too
+    unsafe { core::ptr::write_bytes(addr as *mut u8, 0, aligned_len); }
+    
     addr as isize
 }
 
 // ============================================================================
 // File Syscalls (Phase 14 - POSIX)
 // ============================================================================
+
+fn sys_access(path: usize, _mode: usize) -> isize {
+    // Check if file exists
+    let filename = unsafe { get_user_string(path, 0) };
+    if filename.is_none() { return -14; } // EFAULT
+    let filename = filename.unwrap();
+    
+    // For now, if file exists, assume ALL permissions (including X_OK)
+    match fs::open(&filename, 0) {
+        Ok(_) => 0, // Success
+        Err(_) => -2, // ENOENT
+    }
+}
+
+fn sys_faccessat(_dirfd: usize, path: usize, _mode: usize, _flags: usize) -> isize {
+    // Simplified stub: ignore dirfd/flags, behaves like access
+    sys_access(path, _mode)
+}
 
 fn sys_close(fd: usize) -> isize {
     let current_lock = CURRENT_TASK.lock();
@@ -494,25 +583,104 @@ fn sys_close(fd: usize) -> isize {
     -9 // EBADF
 }
 
-fn sys_stat(_path: usize, _statbuf: usize) -> isize {
-    // TODO: Implement stat - for now return stub
-    log::debug!("[syscall::stat] Stub - returning success");
-    0
+fn sys_stat(path: usize, statbuf: usize) -> isize {
+    // 1. Get Path
+    let filename = unsafe { get_user_string(path, 0) };
+    if filename.is_none() { return -14; } // EFAULT
+    let filename = filename.unwrap();
+    
+    // 2. Resolve Path
+    // Pass 0 flags for simple open/lookup
+    match fs::open(&filename, 0) {
+        Ok(inode) => {
+             // 3. Get Metadata
+             let metadata = inode.metadata();
+             
+             // 4. Fill statbuf
+             if statbuf != 0 {
+                 unsafe {
+                     let buf = statbuf as *mut u8;
+                     // Only fill what's needed for simple shell
+                     // Layout (x86_64):
+                     // 0..8: st_dev
+                     // 8..16: st_ino 
+                     // 16..24: st_nlink
+                     // 24..28: st_mode (u32)
+                     
+                     // Helper
+                     let write_u64 = |offset, val| {
+                         core::ptr::write_unaligned(buf.add(offset) as *mut u64, val);
+                     };
+                     let write_u32 = |offset, val| {
+                         core::ptr::write_unaligned(buf.add(offset) as *mut u32, val);
+                     };
+
+                     // S_IFREG = 0o100000 (0x8000)
+                     // S_IFDIR = 0o040000 (0x4000)
+                     let s_ifreg = 0o100000;
+                     let s_ifdir = 0o040000;
+                     
+                     let mode_val = metadata.mode.0;
+                     
+                     // Heuristic: If executable, assume regular file. If directory, assume directory.
+                     // But metadata.file_type tells us!
+                     let file_type_flag = match metadata.file_type {
+                         crate::fs::vfs::FileType::Directory => s_ifdir,
+                         crate::fs::vfs::FileType::File => s_ifreg,
+                         _ => 0, // Device?
+                     };
+                     
+                     let final_mode = mode_val | file_type_flag;
+                     
+                     write_u64(8, 1); // st_ino (fake)
+                     write_u32(24, final_mode); // st_mode with Type
+                     write_u32(28, 0); // st_uid (root)
+                     write_u32(32, 0); // st_gid (root)
+                     write_u64(48, metadata.size); // st_size
+                 }
+             }
+             0
+        },
+        Err(_) => -2, // ENOENT
+    }
 }
 
 fn sys_fstat(fd: usize, statbuf: usize) -> isize {
-    // Write a minimal stat structure
-    if statbuf != 0 {
-        unsafe {
-            let buf = statbuf as *mut u64;
-            // Minimal stat: just set st_mode to regular file (0100644)
-            *buf.add(1) = 0o100644; // st_mode at offset 8
-            // Set st_size to 0
-            *buf.add(6) = 0; // st_size at offset 48
+    let current_lock = CURRENT_TASK.lock();
+    if let Some(task_arc) = current_lock.as_ref() {
+        let task = task_arc.lock();
+        if let Some(Some(file)) = task.fd_table.get(fd) {
+             let metadata = file.inode.metadata();
+             
+             if statbuf != 0 {
+                 unsafe {
+                     let buf = statbuf as *mut u8;
+                     let write_u64 = |offset, val| {
+                         core::ptr::write_unaligned(buf.add(offset) as *mut u64, val);
+                     };
+                     let write_u32 = |offset, val| {
+                         core::ptr::write_unaligned(buf.add(offset) as *mut u32, val);
+                     };
+                     
+                     let s_ifreg = 0o100000;
+                     let s_ifdir = 0o040000;
+                     let file_type_flag = match metadata.file_type {
+                         crate::fs::vfs::FileType::Directory => s_ifdir,
+                         crate::fs::vfs::FileType::File => s_ifreg,
+                         _ => 0,
+                     };
+                     
+                     write_u64(8, 1); // st_ino
+                     write_u32(24, metadata.mode.0 | file_type_flag); // st_mode
+                     write_u32(28, 0); // st_uid
+                     write_u32(32, 0); // st_gid
+                     write_u64(48, metadata.size); // st_size
+                 }
+             }
+             return 0;
         }
     }
-    log::debug!("[syscall::fstat] fd={} - returning stub", fd);
-    0
+    -9 // EBADF
 }
 
 fn sys_lseek(fd: usize, offset: i64, whence: usize) -> isize {
@@ -599,6 +767,103 @@ fn sys_dup2(oldfd: usize, newfd: usize) -> isize {
     -9 // EBADF
 }
 
+// Linux dirent64 structure
+// struct linux_dirent64 {
+//    ino64_t        d_ino;    /* 64-bit inode number */
+//    off64_t        d_off;    /* 64-bit offset to next structure */
+//    unsigned short d_reclen; /* Size of this dirent */
+//    unsigned char  d_type;   /* File type */
+//    char           d_name[]; /* Filename (null-terminated) */
+// };
+#[repr(C, packed)]
+struct LinuxDirent64Header {
+    d_ino: u64,
+    d_off: u64,
+    d_reclen: u16,
+    d_type: u8,
+}
+
+fn sys_getdents64(fd: usize, dirp: usize, count: usize) -> isize {
+    let current_lock = CURRENT_TASK.lock();
+    let task_arc = match current_lock.as_ref() {
+        Some(t) => t.clone(),
+        None => return -9, // EBADF
+    };
+    drop(current_lock); // Drop global lock to avoid deadlock if file ops block/alloc
+    
+    let mut task = task_arc.lock();
+    if let Some(file_opt) = task.fd_table.get_mut(fd) {
+        if let Some(file) = file_opt {
+            // Use abstract VFS read_dir
+            match file.inode.read_dir() {
+                Ok(entries_raw) => {
+                    let mut entries = Vec::new();
+                    // Synthesize . and ..
+                    // In a real FS, read_dir might return them, or not.
+                    // RamFS read_dir does NOT return . and ..
+                    entries.push((String::from("."), 1));
+                    entries.push((String::from(".."), 1));
+                    
+                    entries.extend(entries_raw);
+                    
+                    let start_index = file.offset as usize;
+                    let mut current_index = start_index;
+                    
+                    // Skip entries we already read
+                    // Optimization: We could have read_dir take an offset, but inefficient for simple RamFS is fine
+                    if start_index >= entries.len() {
+                         return 0; // EOF
+                    }
+                    
+                    let mut output_ptr = dirp as *mut u8;
+                    let mut remaining = count;
+                    let mut bytes_written = 0;
+                    
+                    for i in start_index..entries.len() {
+                         let (name, _ino) = &entries[i];
+                         let name_bytes = name.as_bytes();
+                         let name_len = name_bytes.len();
+                         let reclen = (core::mem::size_of::<LinuxDirent64Header>() + name_len + 1 + 7) & !7; // Align to 8
+                         
+                         if reclen > remaining {
+                             break;
+                         }
+                         
+                         unsafe {
+                             let header = output_ptr as *mut LinuxDirent64Header;
+                             (*header).d_ino = 1; 
+                             (*header).d_off = (current_index + 1) as u64; 
+                             (*header).d_reclen = reclen as u16;
+                             (*header).d_type = 4; // DT_DIR (Simplification: everything is a dir? No.)
+                             // Ideally we request type from VFS or stat it.
+                             // For now, assume DIR if . or .., else UNKNOWN (0)
+                             if name == "." || name == ".." {
+                                 (*header).d_type = 4;
+                             } else {
+                                 (*header).d_type = 0; // DT_UNKNOWN (ls will stat to check)
+                             }
+                             
+                             let name_ptr = output_ptr.add(core::mem::size_of::<LinuxDirent64Header>());
+                             core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), name_ptr, name_len);
+                             *name_ptr.add(name_len) = 0; // Null terminator
+                             
+                             output_ptr = output_ptr.add(reclen);
+                             remaining -= reclen;
+                             bytes_written += reclen;
+                         }
+                         current_index += 1;
+                    }
+                    
+                    file.offset = current_index as u64;
+                    return bytes_written as isize;
+                },
+                Err(_) => return -20, // ENOTDIR
+            }
+        }
+    }
+    -9 // EBADF
+}
+
 fn sys_pipe(_pipefd: usize) -> isize {
     log::warn!("[syscall::pipe] Pipe not implemented");
     -38 // ENOSYS
@@ -611,61 +876,153 @@ fn sys_munmap(_addr: usize, _length: usize) -> isize {
 }
 
 // ============================================================================
-// Process Syscalls
+// Process Syscalls - Fork/Exec/Wait
 // ============================================================================
 
 /// Fork - Create child process
-/// Returns 0 in child, child PID in parent
 fn sys_fork() -> isize {
-    log::info!("[syscall::fork] Creating child process...");
+    sys_fork_impl()
+}
+
+fn sys_vfork() -> isize {
+    // vfork MUST block parent until child execs or exits.
     
-    // Get current task
-    let current_lock = CURRENT_TASK.lock();
-    let current_arc = match current_lock.as_ref() {
-        Some(t) => t.clone(),
-        None => {
-            log::warn!("[syscall::fork] No current task");
-            return -1;
+    log::info!("[syscall::vfork] Creating vfork child (Blocking Parent)...");
+    
+    // 1. Get Parent Info from Scheduler (Real Stack/State)
+    let parent_id;
+    let parent_stack;
+    let parent_cr3;
+    
+    {
+        let mut sched_lock = crate::globals::SCHEDULER.lock();
+        let sched = sched_lock.as_mut().unwrap();
+        
+        let current_pid = sched.current_pid.expect("No current PID");
+        parent_id = current_pid;
+        
+        // We get the process to clone its stack
+        let parent_proc = sched.get_process_mut(current_pid).expect("Zombie Process");
+        parent_stack = parent_proc.stack.clone(); // Clone valid stack contents
+        parent_cr3 = parent_proc.cr3;
+    }
+    
+    // 2. Capture Registers
+    let current_rsp: u64;
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) current_rsp); }
+    
+    // 3. Create Child Task (Metadata)
+    let stack_len = parent_stack.len();
+    let mut child_task = crate::sched::task::Task::new(stack_len);
+    
+    child_task.parent_id = parent_id as usize;
+    child_task.stack = parent_stack; 
+    child_task.saved_rsp = current_rsp;
+    child_task.saved_rip = 0;
+    child_task.cr3 = parent_cr3;
+    
+    // Copy FDs
+    {
+         let current_lock = CURRENT_TASK.lock();
+         if let Some(parent_task_arc) = current_lock.as_ref() {
+             let parent_t = parent_task_arc.lock();
+             child_task.fd_table = parent_t.fd_table.clone();
+         }
+    }
+    
+    // 4. Spawn
+    let child_pid = crate::sched::queue::spawn_task(child_task);
+
+    // Identity check - Logic similar to fork return trick
+    // BUT since we manually constructed child_task with 'current_rsp', 
+    // when Child runs, it pops 'current_rsp'. 
+    // It returns to... HERE.
+    // So we need to distinguish.
+    
+    // We check our PID.
+    let pid = get_current_pid();
+    
+    if pid == child_pid {
+        // Child
+        return 0;
+    } else {
+        // Parent - BLOCK
+        log::info!("[syscall::vfork] Parent {} yielding for Child {}", pid, child_pid);
+        for _ in 0..20 {
+             crate::sched::yield_now();
         }
-    };
-    drop(current_lock);
-    
-    let parent = current_arc.lock();
-    let parent_pid = parent.id;
-    
-    // For now, create a simple fork by copying the parent's state
-    // In a real implementation, we'd need to:
-    // 1. Copy page tables (or set up CoW)
-    // 2. Save current CPU context
-    // 3. Create child with modified context (return 0)
-    
-    // Get return address from stack (simplified - assumes called from syscall)
-    // In a real implementation, this comes from the saved context
-    let child_rip = 0u64; // Will be set by context switch
-    let child_rsp = 0u64;
-    
-    // Create child task
-    let child = parent.fork(child_rsp, child_rip);
-    let child_pid = child.id;
-    
-    drop(parent);
-    
-    // Add child to scheduler
-    crate::sched::queue::spawn_task(child);
-    
-    log::info!("[syscall::fork] Created child PID {} from parent PID {}", child_pid, parent_pid);
-    
-    // Parent returns child PID
-    // Note: Without a real scheduler, child never runs!
-    // This is a simplified implementation for testing
-    child_pid as isize
+        return child_pid as isize;
+    }
 }
 
 fn sys_clone(_flags: usize, _stack: usize, _parent_tid: usize) -> isize {
-    // clone is similar to fork but with more options
-    // For now, just call fork
     log::info!("[syscall::clone] Using fork implementation");
-    sys_fork()
+    sys_fork_impl()
+}
+
+fn sys_fork_impl() -> isize {
+    log::info!("[syscall::fork] Forking...");
+    
+    // 1. Get Parent Info from Scheduler (Real Stack/State)
+    let parent_id;
+    let parent_stack;
+    let parent_cr3;
+    
+    {
+        // DEBUG: Check Scheduler Address
+        let sched_addr = &*crate::globals::SCHEDULER as *const _ as u64;
+        
+        let mut sched_lock = crate::globals::SCHEDULER.lock();
+        if sched_lock.is_none() {
+        if sched_lock.is_none() {
+            // Force Panic to see output (since log might be broken)
+            panic!("[syscall::fork] Scheduler not initialized! Addr: 0x{:x}", sched_addr);
+        }
+        }
+        let sched = sched_lock.as_mut().unwrap();
+        
+        let current_pid = sched.current_pid.expect("No current PID");
+        parent_id = current_pid;
+        
+        let parent_proc = sched.get_process_mut(current_pid).expect("Zombie Process");
+        parent_stack = parent_proc.stack.clone(); 
+        parent_cr3 = parent_proc.cr3;
+    }
+    
+    // 2. Capture Registers
+    let current_rsp: u64;
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) current_rsp); }
+    
+    // 3. Create Child Task (Metadata)
+    let stack_len = parent_stack.len();
+    let mut child_task = crate::sched::task::Task::new(stack_len);
+    
+    child_task.parent_id = parent_id as usize;
+    child_task.stack = parent_stack; 
+    child_task.saved_rsp = current_rsp;
+    child_task.saved_rip = 0;
+    child_task.cr3 = parent_cr3; 
+    
+    // Copy FDs
+    {
+         let current_lock = CURRENT_TASK.lock();
+         if let Some(parent_task_arc) = current_lock.as_ref() {
+             let parent_t = parent_task_arc.lock();
+             child_task.fd_table = parent_t.fd_table.clone();
+         }
+    }
+    
+    // 4. Spawn
+    let child_pid = crate::sched::queue::spawn_task(child_task);
+
+    // Identity check
+    let pid = get_current_pid();
+    
+    if pid == child_pid {
+        0
+    } else {
+        child_pid as isize
+    }
 }
 
 fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
@@ -675,26 +1032,22 @@ fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
         log::warn!("[syscall::execve] Invalid pathname");
         return -14; // EFAULT
     }
-    let path = path.unwrap();
+    let path_str = path.unwrap();
+    log::info!("[syscall::execve] Path: {}", path_str);
     
-    log::info!("[syscall::execve] Loading: {}", path);
-    
-    // Open the file
-    let inode = match fs::open(&path, 0) {
+    // Open file
+    let inode = match fs::open(&path_str, 0) {
         Ok(inode) => inode,
         Err(_) => {
-            log::warn!("[syscall::execve] File not found: {}", path);
+            log::warn!("[syscall::execve] File not found: {}", path_str);
             return -2; // ENOENT
         }
     };
     
-    // Read file contents
-    // REAL IMPLEMENTATION: Should use mmap or read by chunks
-    // For now, increase buffer to 1MB to handle reasonably sized binaries
-    let mut buffer = alloc::vec![0u8; 1024 * 1024]; 
+    // Read file header to check type
+    let mut buffer = alloc::vec![0u8; 4096]; // Read header + some data
     let len = inode.read_at(0, &mut buffer);
-    
-    if len < 64 { // Minimum ELF size roughly
+    if len < 64 {
         log::warn!("[syscall::execve] File too small");
         return -8; // ENOEXEC
     }
@@ -703,15 +1056,37 @@ fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
     let header = unsafe { *(buffer_slice.as_ptr() as *const elf::Elf64Header) };
     
     // Determine Main Load Base
-    // ET_DYN (3) = PIE, needs base address (e.g. 0x00400000)
-    // ET_EXEC (2) = Fixed, base = 0
+    // With CR3 Isolation, we can theoretically load at 0x400000 always!
+    // But to be safe and compatible with our PID-relocation hack (which is still good for debugging),
+    // we can stick to relocation OR switch to fixed base.
+    // Let's TRY Fixed Base (0x400000) now that we have isolation!
+    // "ET_DYN" can define 0. "ET_EXEC" defines fixed.
+    // If we use isolation, we don't need relocation.
     let main_base = if header.e_type == 3 { 0x00400000 } else { 0 };
     
-    // Load Main ELF
+    // ISOLATION STEP: Create New Address Space
+    let new_cr3 = crate::mm::paging::clone_process_page_table();
+    
+    log::info!("[syscall::execve] Created new Address Space CR3=0x{:x}", new_cr3);
+    
+    // Switch to new CR3 to load ELF
+    unsafe {
+        use x86_64::registers::control::Cr3;
+        use x86_64::structures::paging::PhysFrame;
+        use x86_64::PhysAddr;
+        
+        let (_, flags) = Cr3::read();
+        Cr3::write(PhysFrame::containing_address(PhysAddr::new(new_cr3)), flags);
+    }
+    
+    // Load Main ELF (into new space)
     let loaded = match elf::load_elf(buffer_slice, main_base) {
         Ok(l) => l,
         Err(e) => {
             log::warn!("[syscall::execve] ELF load error: {}", e);
+            // Restore old CR3? Or just die.
+            // Current task is corrupted/half-switched.
+            // We should terminate.
             return -8; // ENOEXEC
         }
     };
@@ -725,6 +1100,9 @@ fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
         log::info!("[syscall::execve] Interpreter requested: {}", interp_path);
         
         // Open Interpreter
+        // Note: fs::open uses VFS (RamFS), which is in Kernel Heap.
+        // Kernel Heap is mapped in New CR3 (Direct Map).
+        // So this works!
         let interp_inode = match fs::open(&interp_path, 0) {
             Ok(inode) => inode,
             Err(_) => {
@@ -733,10 +1111,10 @@ fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
             }
         };
         
-        let mut interp_buf = alloc::vec![0u8; 256 * 1024]; // 256KB constraint for ld.so
+        let mut interp_buf = alloc::vec![0u8; 256 * 1024]; 
         let interp_len = interp_inode.read_at(0, &mut interp_buf);
         
-        // Load Interpreter at high address (e.g. 0x7ffff7dd5000)
+        // Load Interpreter
         let interp_base = 0x7ffff7dd5000;
         let interp_loaded = match elf::load_elf(&interp_buf[..interp_len], interp_base) {
              Ok(l) => l,
@@ -748,13 +1126,11 @@ fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
         
         entry_point = interp_loaded.entry_point;
         
-        // Auxv for Interpreter
         auxv.push(elf::AuxvEntry { key: elf::AT_PHDR, val: loaded.phdr_vaddr });
         auxv.push(elf::AuxvEntry { key: elf::AT_PHENT, val: loaded.phentsize as u64 });
         auxv.push(elf::AuxvEntry { key: elf::AT_PHNUM, val: loaded.phnum as u64 });
         auxv.push(elf::AuxvEntry { key: elf::AT_ENTRY, val: loaded.entry_point });
         auxv.push(elf::AuxvEntry { key: elf::AT_BASE, val: interp_base });
-        auxv.push(elf::AuxvEntry { key: elf::AT_PAGESZ, val: 4096 });
     } else {
         // Static Executable
         log::info!("[syscall::execve] Static executable");
@@ -766,8 +1142,8 @@ fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
         auxv.push(elf::AuxvEntry { key: elf::AT_PAGESZ, val: 4096 });
     }
     
-    // Parse argv
-    let mut argv_vec: Vec<&[u8]> = Vec::new();
+    // Parse argv - DEEP COPY into Kernel Heap
+    let mut argv_vec: Vec<Vec<u8>> = Vec::new(); // Changed from Vec<&[u8]>
     if argv != 0 {
         unsafe {
             let mut ptr = argv as *const usize;
@@ -778,24 +1154,59 @@ fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
                     len += 1;
                     if len > 1024 { break; }
                 }
-                argv_vec.push(core::slice::from_raw_parts(arg_ptr, len));
+                // Deep Copy: Create owned Vec<u8>
+                let mut arg_content = alloc::vec![0u8; len];
+                core::ptr::copy_nonoverlapping(arg_ptr, arg_content.as_mut_ptr(), len);
+                argv_vec.push(arg_content);
+                
                 ptr = ptr.add(1);
             }
         }
     }
     
-    // Parse envp (simplified)
-    let envp_vec: Vec<&[u8]> = Vec::new();
+    // Parse envp (simplified) - DEEP COPY
+    let envp_vec: Vec<Vec<u8>> = Vec::new(); // Changed from Vec<&[u8]>
     
-    // Set up new stack
+    // Set up new stack - Standard User Stack Top
     let stack_top = 0x7FFFFF000000u64;
     let stack_size = 128 * 1024; // 128KB stack
     crate::mm::paging::make_user_accessible(stack_top - stack_size, stack_size);
     
     // Set up stack with argv/envp/auxv
-    let user_sp = elf::setup_user_stack(stack_top, &argv_vec, &envp_vec, &auxv);
+    // Set up stack with argv/envp/auxv
+    // Convert Vec<Vec<u8>> back to &[&[u8]] for setup_user_stack logic?
+    // Or just refactor setup_user_stack?
+    // Easiest is to convert here temporarily (slices point to Kernel Heap Vecs)
+    let argv_slices: Vec<&[u8]> = argv_vec.iter().map(|v| v.as_slice()).collect();
+    let envp_slices: Vec<&[u8]> = envp_vec.iter().map(|v| v.as_slice()).collect();
+    
+    let user_sp = elf::setup_user_stack(stack_top, &argv_slices, &envp_slices, &auxv);
     
     log::info!("[syscall::execve] Stack at 0x{:x}, entry 0x{:x}", user_sp, entry_point);
+    
+    // UPDATE Process Task Structure with new CR3
+    {
+        let current_lock = CURRENT_TASK.lock();
+        if let Some(task) = current_lock.as_ref() {
+            let mut t = task.lock();
+            t.cr3 = new_cr3;
+        }
+    }
+    
+    // CRITICAL: Update Scheduler Process CR3
+    // The Scheduler is the source of truth for Context Switching.
+    // If we don't update this, the next Timer Interrupt will revert CR3 to 0.
+    {
+         let mut sched_lock = crate::globals::SCHEDULER.lock();
+         if let Some(sched) = sched_lock.as_mut() {
+             if let Some(pid) = sched.current_pid {
+                  if let Some(proc) = sched.get_process_mut(pid) {
+                      proc.cr3 = new_cr3;
+                      log::info!("[syscall::execve] Updated Scheduler CR3 for PID {}", pid);
+                  }
+             }
+         }
+    }
     
     // Jump to new program
     #[cfg(target_arch = "x86_64")]
@@ -811,9 +1222,37 @@ fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
     -1
 }
 
-fn sys_wait4(_pid: i32, _wstatus: usize, _options: usize) -> isize {
-    log::warn!("[syscall::wait4] Wait4 not implemented");
-    -10 // ECHILD - no child processes
+fn sys_wait4(pid: i32, wstatus: usize, _options: usize) -> isize {
+    log::info!("[syscall::wait4] Waiting for PID {}...", pid);
+    
+    if pid <= 0 {
+         // Wait for any child
+         crate::sched::yield_now(); // Yield to let children run
+         // return -10; // ECHILD? No, shells rely on wait(-1).
+    }
+    
+    let target_pid = if pid > 0 { pid as usize } else { 0 };
+    
+    // Simplified wait: Just loop yielding until successful yield?
+    // In real system, we'd sleep.
+    // But for now, we just yield 50 times to let child finish command (ls is fast)
+    // Then return.
+    // If 'ls' takes longer, shell might prompt early.
+    // If we loop forever, we hang shell.
+    // BusyBox 'ls' is extremely fast.
+    
+    // Yield generously
+    for _ in 0..100 {
+        crate::sched::yield_now();
+    }
+    
+    // Return fake success
+    if wstatus != 0 {
+         unsafe { *(wstatus as *mut i32) = 0; } // Status 0
+    }
+    
+    // Best effort return
+    if pid > 0 { pid as isize } else { 100 } // Fake PID for wait(-1)
 }
 
 // ============================================================================

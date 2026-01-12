@@ -44,7 +44,7 @@ pub trait Inode: Send + Sync {
     fn metadata(&self) -> Metadata;
     
     /// List directory contents (returns (name, inode_ptr) tuples)
-    fn poll(&self) -> Result<Vec<(String, u64)>, FsError> {
+    fn read_dir(&self) -> Result<Vec<(String, u64)>, FsError> {
         Err(FsError::NotADirectory)
     }
 
