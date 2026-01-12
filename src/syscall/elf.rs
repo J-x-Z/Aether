@@ -272,9 +272,30 @@ pub fn setup_user_stack(
         argv_ptrs.insert(0, sp);
     }
     
-    // Align stack to 16 bytes
+    // Verify alignment
     sp &= !0xF;
     
+    // Calculate Padding needed
+    // We will push:
+    // - Auxv (N * 16 bytes) -> Keeps alignment
+    // - Envp Null (8 bytes)
+    // - Envp Ptrs (Envp.len * 8 bytes)
+    // - Argv Null (8 bytes)
+    // - Argv Ptrs (Argv.len * 8 bytes)
+    // - Argc (8 bytes)
+    // Total 8-byte units: 1 + Envp.len + 1 + Argv.len + 1 = Envp.len + Argv.len + 3
+    // We want Final SP aligned to 16.
+    // So TotalUnits must be Even (Total * 8 % 16 == 0).
+    // If (Envp.len + Argv.len + 3) is Odd, we need 1 Padding Unit.
+    // If (Envp.len + Argv.len) is Even, then (Even + Odd) is Odd. We need Padding.
+    // If (Envp.len + Argv.len) is Odd, then (Odd + Odd) is Even. No Padding.
+    
+    let total_push_count = envp.len() + argv.len() + 3;
+    if total_push_count % 2 != 0 {
+        sp -= 8; // Push Padding
+        unsafe { *(sp as *mut u64) = 0; }
+    }
+
     // Push Auxv
     // First push AT_NULL
     sp -= 16;

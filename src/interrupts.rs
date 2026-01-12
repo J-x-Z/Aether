@@ -189,65 +189,63 @@ extern "x86-interrupt" fn page_fault_handler(
     error_code: x86_64::structures::idt::PageFaultErrorCode,
 ) {
     use x86_64::registers::control::Cr2;
-    // Get fault address
     let cr2 = Cr2::read();
     
-    // Log to Screen
+    // Check User Mode
+    if (stack_frame.code_segment & 3) != 0 {
+        crate::early_serial_print(b"\r\n[Exception] User Page Fault! Terminating.\r\n");
+        terminate_current_process();
+        return;
+    }
+
+    // Kernel Fault - Panic
     crate::video::console_print_char(b'!');
     crate::video::console_print_char(b'P');
     crate::video::console_print_char(b'F');
-    
-    // Critical Loop to prevent Double Faults if Panic fails
-    // But we try to panic to show info.
-    panic!(
-        "[EXCEPTION] PAGE FAULT\nAddress: {:?}\nError Code: {:?}\nStack Frame: {:#?}",
-        cr2, error_code, stack_frame
-    );
+    crate::early_serial_print(b"\r\n[EXCEPTION] KERNEL PAGE FAULT\r\n");
+    panic!("[EXCEPTION] PAGE FAULT\nAddress: {:?}\nError: {:?}\nFrame: {:#?}", cr2, error_code, stack_frame);
 }
 
 extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame, error_code: u64)
 {
-    // Screen Output: !GP
+    if (stack_frame.code_segment & 3) != 0 {
+        crate::early_serial_print(b"\r\n[Exception] User GPF! Terminating.\r\n");
+        terminate_current_process();
+        return;
+    }
+
     crate::video::console_print_char(b'!');
     crate::video::console_print_char(b'G');
     crate::video::console_print_char(b'P');
-    
-    // Check CPL from CS (bits 0-1)
-    let cs = stack_frame.code_segment;
-    if (cs & 3) == 0 {
-        // Kernel Fault (likely IRETQ failed)
-        crate::video::console_print_char(b'K');
-    } else {
-        // User Fault
-        crate::video::console_print_char(b'U');
-    }
-    
-    // Print Error Code low nibble
-    let err_low = (error_code & 0xF) as u8;
-    crate::video::console_print_char(if err_low < 10 { b'0' + err_low } else { b'a' + err_low - 10 });
-    
-    loop {
-        x86_64::instructions::hlt();
-    }
+    crate::early_serial_print(b"\r\n[EXCEPTION] KERNEL GPF\r\n");
+    panic!("[EXCEPTION] GPF\nError: {}\nFrame: {:#?}", error_code, stack_frame);
 }
-
 
 extern "x86-interrupt" fn invalid_opcode_handler(
     stack_frame: InterruptStackFrame) 
 {
-    // Screen Output: !UD
+    if (stack_frame.code_segment & 3) != 0 {
+        crate::early_serial_print(b"\r\n[Exception] User Invalid Opcode! Terminating.\r\n");
+        terminate_current_process();
+        return;
+    }
+
     crate::video::console_print_char(b'!');
     crate::video::console_print_char(b'U');
     crate::video::console_print_char(b'D');
-    
-    // Panic to halt
-    panic!("[EXCEPTION] INVALID OPCODE\n{:#?}", stack_frame);
+    crate::early_serial_print(b"\r\n[EXCEPTION] KERNEL UD\r\n");
+    panic!("[EXCEPTION] INVALID OPCODE\nFrame: {:#?}", stack_frame);
 }
 
 extern "x86-interrupt" fn stack_segment_fault_handler(
     stack_frame: InterruptStackFrame, error_code: u64) 
 {
+    if (stack_frame.code_segment & 3) != 0 {
+        crate::early_serial_print(b"\r\n[Exception] User Stack Fault! Terminating.\r\n");
+        terminate_current_process();
+        return;
+    }
     log::error!("[EXCEPTION] STACK FAULT\nError: {}\n{:#?}", error_code, stack_frame);
     panic!("Stack Fault");
 }
@@ -255,8 +253,50 @@ extern "x86-interrupt" fn stack_segment_fault_handler(
 extern "x86-interrupt" fn segment_not_present_handler(
     stack_frame: InterruptStackFrame, error_code: u64)
 {
+    if (stack_frame.code_segment & 3) != 0 {
+        crate::early_serial_print(b"\r\n[Exception] User Segment Not Present! Terminating.\r\n");
+        terminate_current_process();
+        return;
+    }
     log::error!("[EXCEPTION] SEGMENT NOT PRESENT\nError: {}\n{:#?}", error_code, stack_frame);
     panic!("Segment Not Present");
+}
+
+/// Helper to terminate current process from Interrupt Context (User Fault)
+fn terminate_current_process() {
+    unsafe {
+        // We use try_lock because we might have interrupted the Scheduler lock?
+        // Unlikely in User Mode (unless preemption loop).
+        // But to be safe, we spin logic or better:
+        // Force Terminated state.
+        
+        // Note: Interrupts are disabled here (Interrupt Gate).
+        // We need to enable them to allow Timer to switch us out.
+        
+        if let Some(mut sched_lock) = crate::globals::SCHEDULER.try_lock() {
+             if let Some(sched) = sched_lock.as_mut() {
+                 if let Some(pid) = sched.current_pid {
+                      // Mark Core Process
+                      if let Some(proc) = sched.get_process_mut(pid) {
+                          proc.state = aether_core::scheduler::ProcessState::Terminated;
+                      }
+                 }
+             }
+        } else {
+             crate::early_serial_print(b"[Exception] Sched Locked. Forcing loop wait.\r\n");
+             // If locked, maybe we can't switch cleanly? 
+             // We just yield loop. Timer handler will eventually acquire lock hopefully?
+             // Or if we interrupted the Lock Holder (Kernel), then we are screwed (Deadlock).
+             // But valid User Mode fault implies we were in Ring 3, so Kernel shouldn't hold lock!
+        }
+        
+        // Also update Legacy Task if checking wait?
+        // But Legacy Task `wait` logic checks CORE Scheduler `Terminated`.
+        
+        // Enable Interrupts and Loop forever (waiting for Scheduler to reap us)
+        core::arch::asm!("sti");
+        loop { core::arch::asm!("hlt"); }
+    }
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(
@@ -312,6 +352,25 @@ extern "x86-interrupt" fn timer_interrupt_handler(
 {
     // Increment Tick Counter
     let tick = TICKS.fetch_add(1, Ordering::Relaxed);
+    
+    // DEBUG: Check Scheduler ONCE at Tick 100 (approx 1s after boot)
+    if tick == 100 {
+        let sched_addr = &*crate::globals::SCHEDULER as *const _ as u64;
+         // We can't use screen_print easily here (Global Lock contention on SystemTable?)
+         // Use Serial.
+             unsafe {
+                 if let Some(lock) = crate::globals::SCHEDULER.try_lock() {
+                     let is_some = lock.is_some();
+                     if is_some {
+                          crate::early_serial_print(b"[Timer] Scheduler Alive!\r\n");
+                     } else {
+                          crate::early_serial_print(b"[Timer] Scheduler IS NONE!\r\n");
+                     }
+                 } else {
+                     crate::early_serial_print(b"[Timer] Scheduler Locked.\r\n");
+                 }
+             }
+    }
     
     // VISUAL HEARTBEAT: Toggle a pixel in the corner every ~100ms (~10 ticks @ 100Hz)
     // This confirms timer interrupt is firing on real hardware

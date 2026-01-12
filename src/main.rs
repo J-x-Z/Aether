@@ -34,10 +34,12 @@ use uefi::proto::console::gop::GraphicsOutput;
 /// Ultra-early serial output for bare-metal debugging (before any init)
 #[cfg(target_arch = "x86_64")]
 #[inline(never)]
-fn early_serial_print(s: &[u8]) {
+#[cfg(target_arch = "x86_64")]
+#[inline(never)]
+pub fn early_serial_print(s: &[u8]) {
     // Serial port can hang bare metal if not present (reading 0x00 from status = infinite loop)
     // Default to FALSE for safety on real hardware. Enable for QEMU only.
-    const ENABLE_SERIAL: bool = false;
+    const ENABLE_SERIAL: bool = true;
     
     if !ENABLE_SERIAL { return; }
 
@@ -122,10 +124,8 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         };
     }
     
-    screen_print!(system_table, "[BOOT] Aether EFI entry point reached");
-    screen_print!(system_table, "[BOOT] UEFI services initialized");
-    
-    log::info!("Aether Kernel 2.0 (Hybrid/POSIX) booting...");
+    log::info!("Kernel 2.0 (Hybrid/POSIX) booting...");
+    // Banner Removed per user request
     screen_print!(system_table, "[BOOT] Log initialized");
     
     // Initialize UEFI Input (for Hyper-V keyboard)
@@ -237,6 +237,14 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     screen_print!(system_table, "[Kernel] Initializing Scheduler...");
     sched::init();
     
+    // DEBUG: Verify Scheduler immediately
+    {
+        let sched_addr = &*crate::globals::SCHEDULER as *const _ as u64;
+        let is_some = crate::globals::SCHEDULER.lock().is_some();
+        let msg = alloc::format!("[Kernel] Sched Addr: 0x{:x} | Initialized: {}", sched_addr, is_some);
+        screen_print!(system_table, msg.as_str());
+    }
+    
     // 6. Initialize Drivers
     screen_print!(system_table, "[Kernel] Initializing Drivers...");
     drivers::init();
@@ -334,67 +342,112 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                     let user_sp = setup_user_stack(stack_top, argv, envp, &auxv);
                     screen_print!(system_table, "[Kernel] User stack set up!");
                     
-                    screen_print!(system_table, "[Kernel] Setting up kernel stack for TSS...");
-                    // CRITICAL: Use STATIC kernel stack to ensure address is in identity-mapped region
-                    // Heap-allocated stack might have issues on real hardware.
-                    static mut KERNEL_STACK_STORAGE: [u8; 128 * 1024] = [0; 128 * 1024];
-                    let kernel_stack_top = unsafe {
-                        (KERNEL_STACK_STORAGE.as_ptr() as u64 + KERNEL_STACK_STORAGE.len() as u64) & !0xF
-                    };
+                    early_serial_print(b"\r\n");
                     
-                    // DEBUG: Print kernel_stack_top value
-                    early_serial_print(b"[Kernel] RSP0=0x");
+                    // =========================================================================
+                    // CRITICAL: Register Init Process (PID 1)
+                    // =========================================================================
+                    // 1. Define Backend
+                    use aether_core::backend::{Backend, ExitReason};
+                    struct InitBackend;
+                    impl Backend for InitBackend {
+                        fn name(&self) -> &str { "Init" }
+                        fn step(&self) -> ExitReason { ExitReason::Yield }
+                        unsafe fn get_framebuffer(&self, _w: usize, _h: usize) -> &[u32] { &[] }
+                    }
+                    
+                    // 2. Allocate Kernel Stack on HEAP (so we can pass ownership to Scheduler)
+                    // Previously we used static array, but Scheduler expects Vec<u8> for cloning.
+                    let stack_size = 128 * 1024;
+                    let mut kernel_stack = alloc::vec![0u8; stack_size];
+                    let kernel_stack_top = kernel_stack.as_ptr() as u64 + stack_size as u64;
+                    
+                    // Ensure alignment (16 bytes)
+                    let kernel_stack_top = kernel_stack_top & !0xF;
+
+                    early_serial_print(b"[Kernel] RSP0 (Heap)=0x");
                     for i in (0..16).rev() {
                         let nibble = ((kernel_stack_top >> (i * 4)) & 0xF) as u8;
                         let c = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
                         early_serial_print(&[c]);
                     }
                     early_serial_print(b"\r\n");
-                    // Also output to screen
-                    // crate::video::console_print_char(b'K');
-                    // crate::video::console_print_char(b':');
-                    
-                    
+
+                    // 3. Setup TSS/SyscallStucks with this new stack
                     unsafe {
                         crate::arch::x86_64::gdt::set_interrupt_stack(kernel_stack_top);
                     }
-                    
-                    // Set up syscall kernel stack (for swapgs-based syscall handling)
                     #[cfg(target_arch = "x86_64")]
                     crate::arch::x86_64::syscall::setup_syscall_stacks(kernel_stack_top);
                     
-                    // VERIFY: Proactively touch the kernel stack to ensure it's mapped/writable
-                    unsafe {
-                        let ptr = (kernel_stack_top - 8) as *mut u64;
-                        *ptr = 0xDEADBEEF; // Write test
-                        if *ptr != 0xDEADBEEF {
-                             screen_print!(system_table, "[Kernel] Stack R/W Failed!");
+                    // 4. Register with Scheduler
+                    {
+                        use aether_core::scheduler::{Process, ProcessState};
+                        use alloc::sync::Arc;
+                        use alloc::collections::VecDeque;
+                        
+                        let mut sched_lock = crate::globals::SCHEDULER.lock();
+                        if let Some(sched) = sched_lock.as_mut() {
+                             let pid = 1; // Explicitly PID 1
+                             sched.next_pid = 2; // Next is 2
+                             
+                             let process = Process {
+                                 id: pid,
+                                 backend: Arc::new(InitBackend),
+                                 state: ProcessState::Running,
+                                 stack: kernel_stack, // Pass ownership!
+                                 stack_pointer: kernel_stack_top as usize, // Current SP (roughly)
+                                 cr3: 0, // Kernel/Shared CR3
+                             };
+                             
+                             sched.processes.push_back(process);
+                             sched.current_pid = Some(pid);
+                             
+                             early_serial_print(b"[Kernel] Init Registered as PID 1\r\n");
                         } else {
-                             screen_print!(system_table, "[Kernel] Stack R/W OK");
+                            panic!("[Kernel] Scheduler still uninitialized in main?");
                         }
                     }
-                    
-                    screen_print!(system_table, "[Kernel] Kernel stack ready!");
 
-                    screen_print!(system_table, "[Kernel] STALL 3s before User Mode...");
-                    system_table.boot_services().stall(3_000_000); // STALL 3s
+                    // 5. Register in LEGACY Global (CURRENT_TASK) - Required for Syscalls (get_current_pid)
+                    // We must create a Task (Legacy) that mirrors the Process (Core).
+                    {
+                        use crate::sched::task::Task;
+                        use crate::sched::queue::{CURRENT_TASK, ALL_TASKS};
+                        use alloc::sync::Arc;
+                        use spin::Mutex;
+                        
+                        // Create Legacy Task
+                        // Note: Task::new(0) creates empty stack Vec. 
+                        // We use empty stack because `init` runs on `kernel_stack` (Heap Vec) which is managed by Process.
+                        // Legacy Task struct uses `stack` field for cloning.
+                        // Problem: If `sys_fork` clones `Task.stack`, it gets empty vec.
+                        // Resolution: We must SHARE the stack vec or Copy it.
+                        // `kernel_stack` was moved to `Process`. We can't access it.
+                        // WORKAROUND: Create a new Vec, copy content? No, stack is dynamic.
+                        // Better: `sys_fork` should use `Process` (Core) to get stack, NOT `Task` (Legacy).
+                        // I already updated `sys_fork` to use `sched.get_process_mut`.
+                        // So `sys_fork` logic is SAFE.
+                        // `CURRENT_TASK` is only used for `get_current_pid` (ID Only) and FDs.
+                        
+                        let mut task = Task::new(0); // Size 0, invalid stack but ID matters
+                        task.id = 1; // Force ID 1
+                        task.cr3 = 0;
+                        
+                        let task_arc = Arc::new(Mutex::new(task));
+                        
+                        // Set CURRENT_TASK
+                        *CURRENT_TASK.lock() = Some(task_arc.clone());
+                        
+                        // Add to ALL_TASKS (for waitpid? get_task_by_pid?)
+                        ALL_TASKS.lock().push(task_arc);
+                        
+                         early_serial_print(b"[Kernel] Init Registered in Legacy CURRENT_TASK\r\n");
+                    }
 
-                    screen_print!(system_table, "[Kernel] Jumping to Ring 3...");
-                    // Debug: Print entry_point and stack_pointer in hex using early_serial_print
-                    early_serial_print(b"[Kernel] EP=0x");
-                    for i in (0..16).rev() {
-                        let nibble = ((loaded.entry_point >> (i * 4)) & 0xF) as u8;
-                        let c = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
-                        early_serial_print(&[c]);
-                    }
-                    early_serial_print(b" SP=0x");
-                    for i in (0..16).rev() {
-                        let nibble = ((user_sp >> (i * 4)) & 0xF) as u8;
-                        let c = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
-                        early_serial_print(&[c]);
-                    }
-                    early_serial_print(b"\r\n");
-                    // Jump to Ring 3
+                    // Jump to Ring 3 (Using the Stack we just allocated and registered)
+                    // Note: We use `kernel_stack_top` only for INTERRUPTS/RSP0.
+                    // Ring 3 stack (`user_sp`) is separate and already set up.
                     unsafe {
                         arch::enter_usermode(loaded.entry_point, user_sp);
                     }

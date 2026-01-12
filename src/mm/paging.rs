@@ -144,6 +144,7 @@ mod x86_64_paging {
             log::info!("[Paging] Identity mapping: 0x0 - 64GB");
             log::info!("[Paging] Kernel Direct map: 0xFFFF800000000000+");
             
+
             // Switch to our page tables
             let (_, cr3_flags) = x86_64::registers::control::Cr3::read();
             x86_64::registers::control::Cr3::write(
@@ -254,8 +255,9 @@ mod x86_64_paging {
     }
     /// Create a new Page Table (PML4) for a process
     /// Copies Kernel mappings (Identity + Direct Map)
+    /// Performs Deep Copy of User Space Page Tables to ensure isolation.
     /// Returns physical address of new PML4
-    pub fn clone_process_page_table() -> u64 {
+    pub fn clone_process_page_table(current_cr3: u64) -> u64 {
         // Allocate new PML4
         let pml4_addr = alloc_pt_page();
         let pml4 = phys_to_virt(pml4_addr) as *mut u64;
@@ -263,87 +265,120 @@ mod x86_64_paging {
         let kernel_pml4_phys = OUR_PML4.load(Ordering::SeqCst);
         let kernel_pml4 = phys_to_virt(kernel_pml4_phys) as *const u64;
         
+        // Use Current Process CR3 as source for user mappings (if available)
+        // If current_cr3 is 0, we use kernel_pml4 (Initial process)
+        let source_pml4_phys = if current_cr3 == 0 { kernel_pml4_phys } else { current_cr3 };
+        let source_pml4 = phys_to_virt(source_pml4_phys) as *const u64;
+
         unsafe {
             // 1. Copy Upper Half (Kernel Direct Map, etc.)
-            // Entries 256-511 are Kernel Space (Higher Half) -> SHARED.
+            // Entries 256-511 are Kernel Space (Higher Half) -> ALWAYS SHARED from Kernel Boot Table.
             core::ptr::copy_nonoverlapping(kernel_pml4.add(256), pml4.add(256), 256);
             
-            // 2. Handle Lower Half (Identity/User Space) - Index 0
-            // We need to ISOLATE User Space (e.g. 0x400000), which falls into Index 0.
-            // But we MUST Share Kernel Code (0x100000), which ALSO falls into Index 0.
-            // So we need a Deep Copy of the hierarchy for Index 0.
+            // 2. Handle Lower Half (User Space) - Index 0
+            // We need to Deep Copy the Page Structure Hierarchy.
             
-            // A. Allocate New PDPT for Index 0 (which covers 0-512GB Virtual)
-            // Actually this is PML4[0], so it covers 0-512GB.
-            // PDPT entries cover 1GB each.
+            // A. Allocate New PDPT for Index 0
             let new_pdpt_addr = alloc_pt_page();
             let new_pdpt = phys_to_virt(new_pdpt_addr) as *mut u64;
             *pml4.add(0) = new_pdpt_addr | 0x7; // Present, RW, User
 
-            // Get Kernel's PDPT[0]
-            let kernel_pdpt_phys = (*kernel_pml4.add(0)) & !0xFFF;
-            let kernel_pdpt = phys_to_virt(kernel_pdpt_phys) as *const u64;
+            // Get Source PDPT (from current process)
+            let source_pdpt_phys = (*source_pml4.add(0)) & !0xFFF;
+            let source_pdpt = phys_to_virt(source_pdpt_phys) as *const u64;
             
-            // IMPORTANT: Copy ALL entries from Kernel PDPT (1..511)
-            // This ensures we map Physical RAM > 1GB (Video, ACPI, etc.)
-            core::ptr::copy_nonoverlapping(kernel_pdpt, new_pdpt, 512);
+            // D. CRITICAL: Copy Identity Map for High Addresses (1GB - 512GB) in PDPT
+            // Logic similar to before: Copy everything first, then fixup Index 0 (0-1GB)
+            core::ptr::copy_nonoverlapping(source_pdpt, new_pdpt, 512);
             
-            // B. We need to look at PDPT[0] (which covers first 1GB)
-            // It points to a PD. We must CLONE this PD too.
+            // B. Handle PDPT[0] (0-1GB)
+            // It points to a PD. We must CLONE this PD.
             let new_pd_addr = alloc_pt_page();
             let new_pd = phys_to_virt(new_pd_addr) as *mut u64;
             *new_pdpt.add(0) = new_pd_addr | 0x7;
             
-            // Get Kernel's PD[0]
-            let kernel_pd_phys = (*kernel_pdpt.add(0)) & !0xFFF;
-            let kernel_pd = phys_to_virt(kernel_pd_phys) as *const u64;
+            let source_pd_phys = (*source_pdpt.add(0)) & !0xFFF;
+            let source_pd = phys_to_virt(source_pd_phys) as *const u64;
             
-            // C. Copy Kernel Mappings in PD (0-2MB) and Heap (32MB+)
-            // Kernel Code: 0-2MB (Index 0)
-            // User Code: 4MB (Index 2) -> MUST BE ISOLATED/CLEARED
-            // Kernel Heap: 32MB (Index 16) -> MUST BE SHARED
+            // Initialize new PD with Source Data first (Kernel Code 0-2MB, Heap 32MB)
+            core::ptr::copy_nonoverlapping(source_pd, new_pd, 512);
+
+            // C. Deep Copy User Space Entry (Index 2: 4MB-6MB)
+            // We specifically want to isolate the User Code/Data PT.
+            let user_idx = 2; // 4MB
+            let pd_entry = *source_pd.add(user_idx);
             
-            // We iterate all 512 entries of the first PD (covering 0-1GB)
-            for i in 0..512u64 {
-                // Logic:
-                // Index 0: Kernel Code (Usually 0-2MB) - Share
-                // Index 1: 2-4MB - May contain Kernel BSS/Data? - Share to be safe.
-                // Index 2: 4MB-6MB (User Code Base 0x400000) - CLEAR/ISOLATE.
-                // Index 3+: Other - Share (Assume Kernel/Heap/Devices)
+            if (pd_entry & 1) != 0 {
+                // User PT Present. Clone it.
+                let new_pt_addr = alloc_pt_page();
+                let new_pt = phys_to_virt(new_pt_addr) as *mut u64;
+                *new_pd.add(user_idx) = new_pt_addr | 0x7; // Point to new PT
                 
-                // We ONLY isolate the exact 2MB block where User Program is loaded.
-                // This prevents accidentally unmapping Kernel if it's larger than 2MB or loaded strangely.
+                let source_pt_phys = pd_entry & !0xFFF;
+                let source_pt = phys_to_virt(source_pt_phys) as *const u64;
                 
-                if i == 2 {
-                    *new_pd.add(i as usize) = 0; // Clear User Base (4MB - 6MB)
-                } else {
-                    *new_pd.add(i as usize) = *kernel_pd.add(i as usize); // Share everything else
-                }
+                // Copy PT Entries (Shares physical frames, but isolated page tables)
+                // This allows execve to modify the New PT without affecting Parent PT.
+                core::ptr::copy_nonoverlapping(source_pt, new_pt, 512);
+                
+                // log::info!("[VMM] Deep Cloned User PT (Index 2). ParentPT=0x{:x} ChildPT=0x{:x}", source_pt_phys, new_pt_addr);
             }
-            
-            // D. CRITICAL FIX: Copy Identity Map for High Addresses (1GB - 512GB)
-            // If Kernel is loaded > 1GB (e.g. 5GB at 0x140xxxxxx), it lives in PDPT[5].
-            // We MUST share these mappings, or the child process cannot access Kernel Code/Data.
-            for i in 1..512 {
-                 *new_pdpt.add(i) = *kernel_pdpt.add(i);
-            }
-            
-            // D. What about other PDPT entries (1-511)?
-            // PDPT[1] covers 1GB-2GB.
-            // If we have Identity Map of RAM there, we might need it for frame buffers?
-            // Ideally User shouldn't see physical RAM identity map.
-            // So we leave them as 0 for safety, UNLESS Kernel Heap extends there?
-            // Heap Size is 16MB. Fits in PD[0].
-            // So PDPT[1+] are likely unused or Identity Map.
-            // Safe to leave as 0 in new process (unless we need direct hardware access).
-            
-            // Verify: We copied Kernel PD entries (0-16MB).
-            // We shared Higher Half (256-511).
-            // We have a fresh PD for User Space (4MB+) that is Empty.
-            // Perfect integration.
         }
         
         pml4_addr
+    }
+    pub fn switch_to(new_pml4: u64) {
+        unsafe {
+            use x86_64::registers::control::Cr3;
+            use x86_64::structures::paging::PhysFrame;
+            use x86_64::PhysAddr;
+            
+            let (_, flags) = Cr3::read();
+            Cr3::write(PhysFrame::containing_address(PhysAddr::new(new_pml4)), flags);
+        }
+    }
+    
+    // EMERGENCY REPAIR TOOL
+    pub fn debug_fix_scheduler_mapping(sched_addr: u64) {
+        // Calculate Indices
+        let pml4_idx = (sched_addr >> 39) & 0x1FF;
+        let pdpt_idx = (sched_addr >> 30) & 0x1FF;
+        
+        let boot_pml4_phys = OUR_PML4.load(Ordering::SeqCst);
+        let boot_pml4 = phys_to_virt(boot_pml4_phys) as *mut u64;
+        
+        // 1. Get Boot Frame (The Truth)
+        let boot_pdpt_phys = unsafe { (*boot_pml4.add(pml4_idx as usize)) & !0xFFF };
+        if boot_pdpt_phys == 0 {
+             log::error!("[Fix] Boot PML4[{}] is empty! Impossible!", pml4_idx);
+             return;
+        }
+        let boot_pdpt = phys_to_virt(boot_pdpt_phys) as *mut u64;
+        let boot_entry = unsafe { *boot_pdpt.add(pdpt_idx as usize) };
+        let boot_frame = boot_entry & !0xFFF;
+        
+        // 2. Get Current Frame (Except if we are using Boot PML4, then check CR3)
+        // Check actual hardware CR3
+        let current_cr3_phys = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
+        let current_pml4 = phys_to_virt(current_cr3_phys) as *mut u64;
+        
+        let current_pdpt_phys = unsafe { (*current_pml4.add(pml4_idx as usize)) & !0xFFF };
+        let current_pdpt_virt = phys_to_virt(current_pdpt_phys) as *mut u64;
+        let current_entry_ptr = unsafe { current_pdpt_virt.add(pdpt_idx as usize) };
+        let current_entry = unsafe { *current_entry_ptr };
+        let current_frame = current_entry & !0xFFF;
+        
+        log::info!("[Fix] Repairing 5GB... BootFrame=0x{:x} CurrentFrame=0x{:x}", boot_frame, current_frame);
+        
+        if boot_frame != current_frame {
+             unsafe {
+                 crate::early_serial_print(b"[Fix] MISMATCH DETECTED! Overwriting...\r\n");
+                 *current_entry_ptr = boot_entry;
+                 x86_64::instructions::tlb::flush_all();
+             }
+        } else {
+             unsafe { crate::early_serial_print(b"[Fix] Frames Match. Memory is just Zeroed?\r\n"); }
+        }
     }
 }
 

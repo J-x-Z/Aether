@@ -16,6 +16,8 @@ lazy_static! {
 
 pub fn init() {
     log::info!("[Sched] Initialized (Using aether-core scheduler)");
+    let mut sched = SCHEDULER.lock();
+    *sched = Some(aether_core::scheduler::Scheduler::new());
 }
 
 /// Called by Timer Interrupt
@@ -86,6 +88,10 @@ pub fn sleep(duration_ms: u64) {
 }
 
 pub fn yield_now() {
-    unsafe { core::arch::asm!("hlt"); }
+    // CRITICAL FIX: Syscalls disable interrupts (IF=0).
+    // Executing `hlt` with IF=0 hangs the CPU forever (Deadlock).
+    // We must enable interrupts (STI) to allow the Timer Interrupt to wake us up.
+    // We disable them again (CLI) upon return to restore the syscall invariant.
+    unsafe { core::arch::asm!("sti; hlt; cli"); }
 }
 

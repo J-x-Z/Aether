@@ -48,6 +48,10 @@ pub fn init(_phys_offset: u64) {
     ramfs.add_file_to_dir(&bin_dir, "cat", busybox_data.clone());
     ramfs.add_file_to_dir(&bin_dir, "mkdir", busybox_data.clone());
     ramfs.add_file_to_dir(&bin_dir, "echo", busybox_data.clone());
+    ramfs.add_file_to_dir(&bin_dir, "rm", busybox_data.clone());
+    ramfs.add_file_to_dir(&bin_dir, "mv", busybox_data.clone());
+    ramfs.add_file_to_dir(&bin_dir, "cp", busybox_data.clone());
+    ramfs.add_file_to_dir(&bin_dir, "whoami", busybox_data.clone());
     ramfs.add_file_to_dir(&bin_dir, "sh", busybox_data.clone()); // Last one can move if we wanted, but clone for consistency
     
     let root = ramfs.root_inode();

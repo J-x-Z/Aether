@@ -183,7 +183,13 @@ pub mod numbers {
 
 /// Main syscall dispatcher
 pub fn dispatch(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
-    // TRACE REMOVED: Clean output for Shell
+    // TRACE DISABLED: User requests no serial usage
+    /*
+    unsafe {
+         let msg = alloc::format!("[SC] {} ({}, {}, {})\r\n", nr, arg0, arg1, arg2);
+         crate::early_serial_print(msg.as_bytes());
+    }
+    */
     
     // Sanity check: Linux x86_64 has ~450 syscalls, anything much larger is suspicious
     if nr > 500 {
@@ -228,7 +234,7 @@ pub fn dispatch(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
         
         // Time
         numbers::SYS_GETTIMEOFDAY => sys_gettimeofday(arg0, arg1),
-        numbers::SYS_NANOSLEEP => sys_nanosleep(arg0, arg1),
+
         numbers::SYS_CLOCK_GETTIME => sys_clock_gettime(arg0, arg1),
         
         // Misc
@@ -238,8 +244,7 @@ pub fn dispatch(nr: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
         numbers::SYS_GETUID => sys_getuid(),
         numbers::SYS_GETGID => sys_getgid(),
         numbers::SYS_GETEUID => sys_geteuid(),
-        numbers::SYS_GETGID => sys_getgid(),
-        numbers::SYS_GETEUID => sys_geteuid(),
+
         numbers::SYS_GETEGID => sys_getegid(),
         
         // Directory
@@ -313,6 +318,17 @@ fn sys_open(filename: usize, flags: usize, _mode: usize) -> isize {
     let filename = unsafe { get_user_string(filename, 0) };
     if filename.is_none() { return -2; } // ENOENT/EFAULT
     let filename = filename.unwrap();
+    
+    // SCREEN DEBUG: [O: filename]
+    unsafe {
+        crate::video::console_print_char(b'[');
+        crate::video::console_print_char(b'O');
+        crate::video::console_print_char(b':');
+        for &b in filename.as_bytes() {
+            crate::video::console_print_char(b);
+        }
+        crate::video::console_print_char(b']');
+    }
 
     // Call VFS open
     match fs::open(&filename, flags as u32) {
@@ -422,8 +438,11 @@ fn sys_write(fd: usize, buf_ptr: usize, count: usize) -> isize {
     if fd == 1 || fd == 2 {
         unsafe {
             let slice = core::slice::from_raw_parts(buf_ptr as *const u8, count);
-            // DEBUG: Trace removed
-            // crate::video::console_print_char(b'W');
+            
+            // DEBUG: Send to Serial for confirmation
+            crate::early_serial_print(b"[STDOUT] ");
+            crate::early_serial_print(slice);
+            crate::early_serial_print(b"\r\n");
             
             // Write to framebuffer console (Safe for real hardware)
             for &byte in slice {
@@ -449,22 +468,46 @@ fn sys_write(fd: usize, buf_ptr: usize, count: usize) -> isize {
 }
 
 fn sys_exit(code: usize) -> isize {
+    // SCREEN DEBUG: [EXIT: code]
+    unsafe {
+        crate::video::console_print_char(b'[');
+        crate::video::console_print_char(b'E');
+        crate::video::console_print_char(b'X');
+        crate::video::console_print_char(b'I');
+        crate::video::console_print_char(b'T');
+        crate::video::console_print_char(b':');
+        let c = code as u8;
+        if code == 0 {
+             crate::video::console_print_char(b'0');
+        } else {
+             crate::video::console_print_char(if c < 10 { b'0' + c } else { b'X' }); 
+        }
+        crate::video::console_print_char(b']');
+        crate::video::console_print_char(b'\n');
+    }
+
     log::info!("[syscall::exit] Process exited with code {}", code);
     
-    // Update task state
+    // Update Legacy Task State
     let current_lock = CURRENT_TASK.lock();
     if let Some(task_arc) = current_lock.as_ref() {
         let mut task = task_arc.lock();
         task.state = crate::sched::task::TaskState::Terminated;
+        
+        // Update CORE Scheduler State
+        if let Some(mut sched_lock) = crate::globals::SCHEDULER.lock().as_mut() {
+             if let Some(proc) = sched_lock.get_process_mut(task.id as u64) {
+                 use aether_core::scheduler::ProcessState;
+                 proc.state = ProcessState::Terminated;
+                 log::info!("[syscall::exit] Core Process {} Terminated", task.id);
+             }
+        }
     }
+    drop(current_lock); // Release lock before yielding
     
-    // Trigger scheduler (TODO)
+    // Yield forever (Scheduler will switch away and never switch back)
     loop {
-        // Halt cpu to simplify
-        #[cfg(target_arch = "x86_64")]
-        unsafe { core::arch::asm!("hlt") };
-        #[cfg(target_arch = "aarch64")]
-        unsafe { core::arch::asm!("wfi") };
+        crate::sched::yield_now();
     }
 }
 
@@ -776,6 +819,7 @@ fn sys_dup2(oldfd: usize, newfd: usize) -> isize {
 //    char           d_name[]; /* Filename (null-terminated) */
 // };
 #[repr(C, packed)]
+#[repr(C, packed)]
 struct LinuxDirent64Header {
     d_ino: u64,
     d_off: u64,
@@ -784,6 +828,7 @@ struct LinuxDirent64Header {
 }
 
 fn sys_getdents64(fd: usize, dirp: usize, count: usize) -> isize {
+    crate::early_serial_print(b"[Syscall] getdents64 called\r\n");
     let current_lock = CURRENT_TASK.lock();
     let task_arc = match current_lock.as_ref() {
         Some(t) => t.clone(),
@@ -890,22 +935,35 @@ fn sys_vfork() -> isize {
     log::info!("[syscall::vfork] Creating vfork child (Blocking Parent)...");
     
     // 1. Get Parent Info from Scheduler (Real Stack/State)
-    let parent_id;
-    let parent_stack;
-    let parent_cr3;
+    let parent_id: u64;
+    let parent_stack: Vec<u8>;
+    let parent_cr3: u64;
     
     {
+        // DEBUG: Check Scheduler Address
+        let sched_addr = &*crate::globals::SCHEDULER as *const _ as u64;
+        
         let mut sched_lock = crate::globals::SCHEDULER.lock();
+        if sched_lock.is_none() {
+            // Read raw memory to see if it's 0 or garbage
+            let raw_val = unsafe { *(sched_addr as *const u64) };
+            panic!("[syscall::vfork] Scheduler GONE! Addr: 0x{:x} RawVal: 0x{:x}", sched_addr, raw_val);
+        }
         let sched = sched_lock.as_mut().unwrap();
         
-        let current_pid = sched.current_pid.expect("No current PID");
-        parent_id = current_pid;
+        // Save current state FIRST
+        if let Some(pid) = sched.current_pid {
+            parent_id = pid as u64;
+        } else {
+             // Fallback for PID 0/Init
+             parent_id = 0;
+        }
         
-        // We get the process to clone its stack
-        let parent_proc = sched.get_process_mut(current_pid).expect("Zombie Process");
-        parent_stack = parent_proc.stack.clone(); // Clone valid stack contents
+        let parent_proc = sched.get_process_mut(parent_id).expect("Zombie Process");
+        parent_stack = parent_proc.stack.clone(); 
         parent_cr3 = parent_proc.cr3;
     }
+
     
     // 2. Capture Registers
     let current_rsp: u64;
@@ -964,36 +1022,41 @@ fn sys_fork_impl() -> isize {
     log::info!("[syscall::fork] Forking...");
     
     // 1. Get Parent Info from Scheduler (Real Stack/State)
-    let parent_id;
-    let parent_stack;
-    let parent_cr3;
+    let parent_id: u64;
+    let parent_stack: Vec<u8>;
+    let parent_cr3: u64;
     
     {
-        // DEBUG: Check Scheduler Address
-        let sched_addr = &*crate::globals::SCHEDULER as *const _ as u64;
-        
+        // 1. Get Parent Info from Scheduler
+        // We expect the scheduler to be initialized and the current process to be valid.
         let mut sched_lock = crate::globals::SCHEDULER.lock();
-        if sched_lock.is_none() {
-        if sched_lock.is_none() {
-            // Force Panic to see output (since log might be broken)
-            panic!("[syscall::fork] Scheduler not initialized! Addr: 0x{:x}", sched_addr);
-        }
-        }
-        let sched = sched_lock.as_mut().unwrap();
+        let sched = sched_lock.as_mut().expect("Scheduler not initialized!");
         
-        let current_pid = sched.current_pid.expect("No current PID");
-        parent_id = current_pid;
+        // Save current state FIRST
+        if let Some(pid) = sched.current_pid {
+            parent_id = pid as u64;
+        } else {
+             // If we are here, it means we are in Init but `current_pid` is None?
+             // But we just set `current_pid = Some(1)` in main!
+             // So this should be unreachable unless context switch cleared it (Idle?).
+             // If Idle calls fork? Impossible.
+             panic!("[syscall::fork] Current PID is None! Init process ghosting?");
+        }
         
-        let parent_proc = sched.get_process_mut(current_pid).expect("Zombie Process");
+        let parent_proc = sched.get_process_mut(parent_id).expect("Zombie Process or Invalid PID");
         parent_stack = parent_proc.stack.clone(); 
         parent_cr3 = parent_proc.cr3;
     }
     
-    // 2. Capture Registers
+    // 2. Clone Page Table (CR3) - DEEP COPY Logic via mm::paging
+    let new_cr3 = crate::mm::paging::clone_process_page_table(parent_cr3);
+    log::info!("[syscall::fork] Cloned Page Table: Old=0x{:x} New=0x{:x}", parent_cr3, new_cr3);
+
+    // 3. Capture Registers
     let current_rsp: u64;
     unsafe { core::arch::asm!("mov {}, rsp", out(reg) current_rsp); }
     
-    // 3. Create Child Task (Metadata)
+    // 4. Create Child Task (Metadata)
     let stack_len = parent_stack.len();
     let mut child_task = crate::sched::task::Task::new(stack_len);
     
@@ -1001,7 +1064,7 @@ fn sys_fork_impl() -> isize {
     child_task.stack = parent_stack; 
     child_task.saved_rsp = current_rsp;
     child_task.saved_rip = 0;
-    child_task.cr3 = parent_cr3; 
+    child_task.cr3 = new_cr3; // Use NEW CR3 
     
     // Copy FDs
     {
@@ -1016,9 +1079,9 @@ fn sys_fork_impl() -> isize {
     let child_pid = crate::sched::queue::spawn_task(child_task);
 
     // Identity check
-    let pid = get_current_pid();
+    let pid = get_current_pid(); // usize
     
-    if pid == child_pid {
+    if pid == child_pid as usize {
         0
     } else {
         child_pid as isize
@@ -1026,6 +1089,16 @@ fn sys_fork_impl() -> isize {
 }
 
 fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
+    // SCREEN DEBUG: [EXEC]
+    unsafe {
+        crate::video::console_print_char(b'[');
+        crate::video::console_print_char(b'E');
+        crate::video::console_print_char(b'X');
+        crate::video::console_print_char(b'E');
+        crate::video::console_print_char(b'C');
+        crate::video::console_print_char(b']');
+    }
+
     // Get pathname string
     let path = unsafe { get_user_string(pathname, 0) };
     if path.is_none() {
@@ -1065,11 +1138,13 @@ fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
     let main_base = if header.e_type == 3 { 0x00400000 } else { 0 };
     
     // ISOLATION STEP: Create New Address Space
-    let new_cr3 = crate::mm::paging::clone_process_page_table();
+    // Pass 0 to create a fresh User Space (Based on Kernel Boot, Empty User Mappings)
+    let new_cr3 = crate::mm::paging::clone_process_page_table(0);
     
-    log::info!("[syscall::execve] Created new Address Space CR3=0x{:x}", new_cr3);
+    log::info!("[syscall::execve] Created new Address Space CR3=0x{:x}. Switching...", new_cr3);
     
-    // Switch to new CR3 to load ELF
+    // CRITICAL FIX: Switch to new CR3 to load ELF!
+    // Otherwise we load into OLD address space, but jump to NEW address space (which is empty).
     unsafe {
         use x86_64::registers::control::Cr3;
         use x86_64::structures::paging::PhysFrame;
@@ -1209,6 +1284,15 @@ fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
     }
     
     // Jump to new program
+    // Jump to new program
+    crate::early_serial_print(b"[Exec] Success! Jumping to User Mode...\r\n");
+    // Force Screen Output
+    unsafe {
+        for &b in b"[Exec] Success! Jumping to User Mode...\n" {
+            crate::video::console_print_char(b);
+        }
+    }
+    
     #[cfg(target_arch = "x86_64")]
     unsafe {
         crate::arch::x86_64::enter_usermode(entry_point, user_sp);
@@ -1228,31 +1312,59 @@ fn sys_wait4(pid: i32, wstatus: usize, _options: usize) -> isize {
     if pid <= 0 {
          // Wait for any child
          crate::sched::yield_now(); // Yield to let children run
-         // return -10; // ECHILD? No, shells rely on wait(-1).
+         // Real shell needs Any Child wait logic.
+         // For simplistic "sh", it usually waits for specific PID it just forked.
+         // If pid is -1, we loop a bit then return.
+         for _ in 0..100 { crate::sched::yield_now(); }
+         return -10; // ECHILD? 
     }
     
-    let target_pid = if pid > 0 { pid as usize } else { 0 };
+    let target_pid = pid as u64;
     
-    // Simplified wait: Just loop yielding until successful yield?
-    // In real system, we'd sleep.
-    // But for now, we just yield 50 times to let child finish command (ls is fast)
-    // Then return.
-    // If 'ls' takes longer, shell might prompt early.
-    // If we loop forever, we hang shell.
-    // BusyBox 'ls' is extremely fast.
-    
-    // Yield generously
-    for _ in 0..100 {
+    // Polling Loop: Wait until target process is TERMINATED
+    // In a real OS, we would sleep on a Condition Variable / WaitQueue.
+    // Here we spin-yield.
+    let mut ticks = 0;
+    loop {
+        let mut finished = false;
+        
+        // Scope the lock
+        {
+             let mut sched_lock = crate::globals::SCHEDULER.lock();
+             if let Some(sched) = sched_lock.as_mut() {
+                 if let Some(proc) = sched.get_process_mut(target_pid) {
+                     if proc.state == aether_core::scheduler::ProcessState::Terminated {
+                         finished = true;
+                     }
+                 } else {
+                     // Process GONE? Maybe cleaned up?
+                     // Consider it finished.
+                     finished = true;
+                     log::warn!("[syscall::wait4] PID {} is gone!", target_pid);
+                 }
+             }
+        }
+        
+        if finished {
+             log::info!("[syscall::wait4] PID {} Terminated. Returning.", target_pid);
+             break;
+        }
+        
+        // Yield to allow Child to run
         crate::sched::yield_now();
+        ticks += 1;
+        
+        if ticks % 1000 == 0 {
+             // log::trace!("[syscall::wait4] Still waiting for {} ({})", target_pid, ticks);
+        }
     }
-    
+
     // Return fake success
     if wstatus != 0 {
          unsafe { *(wstatus as *mut i32) = 0; } // Status 0
     }
     
-    // Best effort return
-    if pid > 0 { pid as isize } else { 100 } // Fake PID for wait(-1)
+    pid as isize
 }
 
 // ============================================================================
@@ -1326,10 +1438,16 @@ fn sys_getcwd(buf: usize, size: usize) -> isize {
     -34 // ERANGE
 }
 
-fn sys_chdir(_path: usize) -> isize {
-    // Stub - pretend to change directory
-    log::debug!("[syscall::chdir] Stub - returning success");
-    0
+fn sys_chdir(path: usize) -> isize {
+    // Stub - only allow "/"
+    let filename = unsafe { get_user_string(path, 0) };
+    if let Some(name) = filename {
+         if name == "/" {
+             return 0;
+         }
+    }
+    log::debug!("[syscall::chdir] Stub - rejecting");
+    -2 // ENOENT
 }
 
 fn sys_getuid() -> isize { 0 }   // root
